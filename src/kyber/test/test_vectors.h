@@ -30,6 +30,16 @@ fill_lcg_bytes(uint8_t out[128], uint32_t seed)
     }
 }
 
+static void
+fill_lcg_bytes32(uint8_t out[32], uint32_t seed)
+{
+    for (int i = 0; i < 32; i++)
+    {
+        seed = seed * 1103515245u + 12345u;
+        out[i] = (uint8_t)(seed >> 24);
+    }
+}
+
 static const uint8_t test_seed[32] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
                                        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
 

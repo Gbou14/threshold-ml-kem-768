@@ -14,13 +14,17 @@ See project discussion notes for the CPA-vs-CCA and "quantum-safe" framing.
     SHAKE-128/256 (OpenSSL EVP), poly compress/decompress/serialize
   - Validated byte-exact against pq-crystals/kyber reference on every function
   - `make test` in `src/kyber/` — self-contained regression suite
-- [ ] Phase 2: IND-CPA Kyber PKE (`src/kyber/indcpa.c`)
-  - [ ] Matrix generation: SHAKE-128 XOF + rejection sampling from seed rho
-  - [ ] KeyGen: sample A, s, e; compute t = A*s + e; pack pk/sk
-  - [ ] Enc: sample r, e1, e2; compute u, v; pack ciphertext
-  - [ ] Dec: recover message from u, v, s
-  - [ ] Validate: byte-exact pk/sk/ciphertext against reference for a fixed
-        seed, plus round-trip correctness (Dec(Enc(m)) == m) over random trials
+- [x] Phase 2: IND-CPA Kyber PKE (`src/kyber/indcpa.c`, `polyvec.c`)
+  - [x] Matrix generation: SHAKE-128 XOF + rejection sampling from seed rho
+  - [x] KeyGen: sample A, s, e; compute t = A*s + e; pack pk/sk
+  - [x] Enc: sample r, e1, e2; compute u, v; pack ciphertext
+  - [x] Dec: recover message from u, v, s
+  - [x] Validate: byte-exact pk/sk/ciphertext/recovered-message against
+        reference for a fixed seed, plus round-trip correctness
+        (Dec(Enc(m)) == m) over 32 random trials
+  - Caught and fixed a real bug here: `kyber_ntt_init()` was never wired
+    into the library code path, only into test harnesses -- see
+    `src/kyber/README.md` "A real bug this caught"
 - [ ] Phase 3: Extend Shamir/Lagrange to polynomial-vector coefficients
   - [ ] Generalize `shamir.c`/`lagrange.c` from scalars (mod 97) to
         component-wise sharing of s over Z_q (q=3329), vectors of degree-256 polys

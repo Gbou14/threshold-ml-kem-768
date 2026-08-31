@@ -48,6 +48,8 @@ poly_invntt_tomont(poly *r)
 void
 poly_basemul_montgomery(poly *r, const poly *a, const poly *b)
 {
+    kyber_ntt_init();
+
     /* Each NTT "slot" i represents an element of Z_q[X]/(X^2 - zetas[64+i])
      * (or its negation for the odd-indexed slot); zetas[64..127] are
      * exactly the twiddle factors for that top layer of the transform. */

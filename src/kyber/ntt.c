@@ -65,6 +65,8 @@ kyber_ntt_init(void)
 void
 ntt(int16_t r[256])
 {
+    kyber_ntt_init();
+
     unsigned int k = 1;
     for (unsigned int len = 128; len >= 2; len >>= 1)
     {
@@ -84,6 +86,8 @@ ntt(int16_t r[256])
 void
 invntt(int16_t r[256])
 {
+    kyber_ntt_init();
+
     /* mont^2 / 128 mod q, folds the final Montgomery-domain rescale and
      * the 1/128 factor of the inverse transform into one constant. */
     const int16_t f = 1441;
