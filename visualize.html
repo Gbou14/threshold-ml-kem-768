@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Threshold Decryption Analysis</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial; margin: 40px; }
+        canvas { margin-bottom: 60px; }
+    </style>
+</head>
+<body>
+
+<h1>Threshold Decryption Research Dashboard</h1>
+
+<h2>1️⃣ Noise vs Success</h2>
+<canvas id="successChart"></canvas>
+
+<h2>2️⃣ Noise vs Reconstruction Distance</h2>
+<canvas id="distanceChart"></canvas>
+
+<h2>3️⃣ Empirical Failure Probability</h2>
+<canvas id="failureChart"></canvas>
+
+<script>
+fetch('data/results.csv')
+.then(r => r.text())
+.then(text => {
+
+    const lines = text.trim().split('\n').slice(1);
+
+    let noise = [];
+    let success = [];
+    let distance = [];
+
+    lines.forEach(line => {
+        const parts = line.split(',');
+        noise.push(parseInt(parts[0]));
+        distance.push(parseInt(parts[2]));
+        success.push(parseInt(parts[3]));
+    });
+
+    // -------------------------------
+    // 1️⃣ Noise vs Success Scatter
+    // -------------------------------
+    new Chart(document.getElementById('successChart'), {
+        type: 'scatter',
+        data: {
+            datasets: [{
+                label: 'Success (1) / Failure (0)',
+                data: noise.map((n,i) => ({x:n,y:success[i]}))
+            }]
+        }
+    });
+
+    // -------------------------------
+    // 2️⃣ Noise vs Distance
+    // -------------------------------
+    new Chart(document.getElementById('distanceChart'), {
+        type: 'scatter',
+        data: {
+            datasets: [{
+                label: 'Distance from Correct Message',
+                data: noise.map((n,i) => ({x:n,y:distance[i]}))
+            }]
+        }
+    });
+
+    // -------------------------------
+    // 3️⃣ Failure Probability Curve
+    // -------------------------------
+    let buckets = {};
+    for (let i = 0; i < noise.length; i++) {
+        let n = noise[i];
+        if (!buckets[n]) buckets[n] = { total:0, fail:0 };
+        buckets[n].total++;
+        if (success[i] === 0) buckets[n].fail++;
+    }
+
+    let bucketKeys = Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+    let failureProb = bucketKeys.map(k =>
+        buckets[k].fail / buckets[k].total
+    );
+
+    new Chart(document.getElementById('failureChart'), {
+        type: 'line',
+        data: {
+            labels: bucketKeys,
+            datasets: [{
+                label: 'Failure Probability',
+                data: failureProb
+            }]
+        }
+    });
+
+});
+</script>
+
+</body>
+</html>
+

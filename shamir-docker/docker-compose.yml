@@ -1,0 +1,94 @@
+version: "3.9"
+
+# ── Threshold LWE Decryption — 3-of-5 multi-container demo ──────────────────
+#
+# Startup order:
+#   1. sh1..sh5 start (shareholder HTTP servers)
+#   2. dealer    splits keygen s[], sends one share-vector to each sh*
+#   3. coordinator  runs 200 encrypt→partial_decrypt→reconstruct trials
+#                   writes results to ./data/results.csv
+#
+# Experiments:
+#   # Use a different 3-party subset:
+#   docker compose run -e USE_HOSTS=sh1,sh3,sh5 coordinator
+#
+#   # Test below threshold (will fail to reconstruct correctly):
+#   docker compose run -e USE_HOSTS=sh1,sh2 -e THRESHOLD=3 coordinator
+#
+#   # Change trial count:
+#   docker compose run -e N_TRIALS=500 coordinator
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  shamir-net:
+    driver: bridge
+
+volumes:
+  results:        # shared between coordinator and host for CSV output
+
+x-sh-base: &sh-base
+  build: .
+  networks: [shamir-net]
+  command: ["./shareholder", "8080"]
+  expose: ["8080"]
+  restart: "no"
+
+services:
+
+  # ── Share-holders ─────────────────────────────────────────────────────────
+  sh1:
+    <<: *sh-base
+    container_name: sh1
+    hostname: sh1
+
+  sh2:
+    <<: *sh-base
+    container_name: sh2
+    hostname: sh2
+
+  sh3:
+    <<: *sh-base
+    container_name: sh3
+    hostname: sh3
+
+  sh4:
+    <<: *sh-base
+    container_name: sh4
+    hostname: sh4
+
+  sh5:
+    <<: *sh-base
+    container_name: sh5
+    hostname: sh5
+
+  # ── Dealer ────────────────────────────────────────────────────────────────
+  dealer:
+    build: .
+    container_name: dealer
+    hostname: dealer
+    networks: [shamir-net]
+    command: ["./dealer"]
+    environment:
+      SHAREHOLDER_HOSTS: "sh1,sh2,sh3,sh4,sh5"
+      SHAREHOLDER_PORT:  "8080"
+    depends_on: [sh1, sh2, sh3, sh4, sh5]
+    restart: "no"
+
+  # ── Coordinator ───────────────────────────────────────────────────────────
+  coordinator:
+    build: .
+    container_name: coordinator
+    hostname: coordinator
+    networks: [shamir-net]
+    command: ["./coordinator"]
+    environment:
+      THRESHOLD:         "3"
+      SHAREHOLDER_HOSTS: "sh1,sh2,sh3,sh4,sh5"
+      SHAREHOLDER_PORT:  "8080"
+      N_TRIALS:          "200"
+      OUTPUT_FILE:       "/data/results.csv"
+      # USE_HOSTS: "sh1,sh3,sh5"   # uncomment to pick a specific subset
+    volumes:
+      - ./data:/data                # results.csv appears in ./data/ on host
+    depends_on: [dealer]
+    restart: "no"

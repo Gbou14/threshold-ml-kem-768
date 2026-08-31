@@ -1,0 +1,10 @@
+# Compiled binaries and objects
+threshold
+*.o
+*.out
+
+# Archived duplicate of shamir-docker/ (kept as backup, not tracked)
+shamir-docker.tar.gz
+
+# Generated experiment output (regenerable)
+data/*.csv
