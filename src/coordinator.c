@@ -1,18 +1,28 @@
 /*
- * coordinator.c — threshold ML-KEM-768 decapsulation + AES-256-GCM demo
+ * coordinator.c — full CCA-secure threshold ML-KEM-768 decapsulation +
+ * AES-256-GCM demo
  *
  * Each trial:
- *   1. Generate a random 32-byte value m and encapsulate it with the
- *      dealer's public key (indcpa_enc) -- this is the "sender" role.
+ *   1. Encapsulate a fresh random value with the dealer's public key
+ *      ek via the real KEM (kyber_encaps_derand) -- this is the
+ *      "sender" role, and it's the actual Fujisaki-Okamoto-wrapped
+ *      ML-KEM-768 Encaps, not the bare IND-CPA PKE.
  *   2. Send the ciphertext to k shareholders' /partial_decrypt; collect
- *      their partial decryptions.
- *   3. Lagrange-combine the k partials to recover m -- this is the
- *      "receiver" role, and never touches the secret key, only shares
- *      of it via the shareholders' responses.
- *   4. Derive an AES-256 key from each side's view of m (SHA3-256) and
- *      run an authenticated encrypt/decrypt round-trip, so a wrong
- *      reconstruction fails GCM tag verification rather than silently
- *      producing garbage.
+ *      their partial decryptions (this part is unchanged from the
+ *      IND-CPA-only version -- a shareholder's role is the same either
+ *      way, see src/kyber/README.md's "Phase 5" section).
+ *   3. threshold_decaps Lagrange-combines the k partials and finishes
+ *      the FO re-encryption check -- this is the "receiver"/combiner
+ *      role. It never touches the private key, but it does briefly
+ *      reconstruct the decrypted message on the way to the real
+ *      shared secret; that's the explicit, narrower trust assumption
+ *      documented in src/kyber/README.md, not an oversight.
+ *   4. Use the KEM's own output directly as the AES-256 key (ML-KEM's
+ *      shared secret is already meant to be used this way -- no extra
+ *      KDF step needed once you have a real KEM, unlike the earlier
+ *      IND-CPA-only version of this file) and run an authenticated
+ *      encrypt/decrypt round trip, so a wrong reconstruction fails GCM
+ *      tag verification rather than silently producing garbage.
  *
  * ENV:
  *   THRESHOLD           (default: 3)
@@ -21,7 +31,8 @@
  *   USE_HOSTS           optional subset (e.g. "sh1,sh3,sh5")
  *   N_TRIALS            number of trials (default: 200)
  *   OUTPUT_FILE         CSV path (default: /data/results.csv)
- *   PUBKEY_PATH         where the dealer wrote pk (default: /data/pk.bin)
+ *   EK_PATH             where the dealer wrote ek (default: /data/ek.bin)
+ *   Z_PATH              where the dealer wrote z (default: /data/z.bin)
  */
 
 #include <stdio.h>
@@ -33,13 +44,13 @@
 #include <openssl/rand.h>
 
 #include "hexutil.h"
-#include "kyber/indcpa.h"
-#include "kyber/shake.h"
+#include "kyber/kem.h"
 #include "kyber/threshold.h"
 #include "params.h"
 
 #define MAX_HOST_LEN 64
-#define AES_KEY_LEN 32
+/* KYBER_SSBYTES (32) doubles as the AES-256 key length -- the KEM's
+ * shared secret is used directly as the AES key, no separate KDF. */
 #define IV_LEN 16
 #define TAG_LEN 16
 #define MAX_MSG_LEN 256
@@ -184,18 +195,18 @@ parse_partial_response(const char *json, int *x_out, uint8_t partial_bytes[KYBER
     return hex_decode(partial_bytes, KYBER_POLYBYTES, hex);
 }
 
-/* Wait for the dealer to publish the public key. */
+/* Wait for the dealer to publish a file (ek or z) of exactly len bytes. */
 static int
-wait_for_pubkey(const char *path, uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES])
+wait_for_file(const char *path, uint8_t *out, size_t len)
 {
     for (int i = 0; i < 120; i++)
     {
         FILE *f = fopen(path, "rb");
         if (f)
         {
-            size_t n = fread(pk, 1, KYBER_INDCPA_PUBLICKEYBYTES, f);
+            size_t n = fread(out, 1, len, f);
             fclose(f);
-            if (n == KYBER_INDCPA_PUBLICKEYBYTES)
+            if (n == len)
             {
                 return 0;
             }
@@ -262,7 +273,8 @@ main(void)
     const char *port_str = getenv("SHAREHOLDER_PORT");
     const char *ntrials_str = getenv("N_TRIALS");
     const char *outfile = getenv("OUTPUT_FILE");
-    const char *pk_path_env = getenv("PUBKEY_PATH");
+    const char *ek_path_env = getenv("EK_PATH");
+    const char *z_path_env = getenv("Z_PATH");
 
     int k = k_str ? atoi(k_str) : THRESHOLD;
     int sh_port = port_str ? atoi(port_str) : 8080;
@@ -271,7 +283,8 @@ main(void)
     {
         outfile = "/data/results.csv";
     }
-    const char *pk_path = pk_path_env ? pk_path_env : "/data/pk.bin";
+    const char *ek_path = ek_path_env ? ek_path_env : "/data/ek.bin";
+    const char *z_path = z_path_env ? z_path_env : "/data/z.bin";
 
     const char *hosts_csv = use_str ? use_str : (hosts_str ? hosts_str : "sh1,sh2,sh3,sh4,sh5");
     char hosts[N_PARTIES][MAX_HOST_LEN];
@@ -286,15 +299,16 @@ main(void)
     printf("[coord] Threshold=%d  Trials=%d  Output=%s\n", k, ntrials, outfile);
     fflush(stdout);
 
-    printf("[coord] Waiting for dealer's public key at %s...\n", pk_path);
+    printf("[coord] Waiting for dealer's ek at %s and z at %s...\n", ek_path, z_path);
     fflush(stdout);
-    uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES];
-    if (wait_for_pubkey(pk_path, pk) != 0)
+    uint8_t ek[KYBER_PUBLICKEYBYTES];
+    uint8_t z[KYBER_SYMBYTES];
+    if (wait_for_file(ek_path, ek, sizeof(ek)) != 0 || wait_for_file(z_path, z, sizeof(z)) != 0)
     {
-        fprintf(stderr, "[coord] public key never appeared at %s\n", pk_path);
+        fprintf(stderr, "[coord] ek/z never appeared\n");
         return 1;
     }
-    printf("[coord] Loaded public key.\n");
+    printf("[coord] Loaded ek and z.\n");
     fflush(stdout);
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -325,18 +339,19 @@ main(void)
         const char *msg = messages[trial % n_messages];
         int msg_len = (int)strlen(msg);
 
-        /* ── Sender side: encapsulate a fresh random value m. ── */
-        uint8_t m[KYBER_MSGBYTES];
-        uint8_t enc_coins[KYBER_SYMBYTES];
-        RAND_bytes(m, sizeof(m));
+        /* ── Sender side: real ML-KEM-768 Encaps (KeyGen already ran in
+         * the dealer; this is the FO-wrapped encapsulation, not the
+         * bare IND-CPA PKE). ── */
+        uint8_t enc_coins[KYBER_SYMBYTES]; /* the message being encapsulated */
         RAND_bytes(enc_coins, sizeof(enc_coins));
 
-        uint8_t ct[KYBER_INDCPA_BYTES];
-        indcpa_enc(ct, m, pk, enc_coins);
+        uint8_t ct[KYBER_CIPHERTEXTBYTES];
+        uint8_t ss_enc[KYBER_SSBYTES];
+        kyber_encaps_derand(ct, ss_enc, ek, enc_coins);
 
-        char ct_hex[2 * KYBER_INDCPA_BYTES + 1];
+        char ct_hex[2 * KYBER_CIPHERTEXTBYTES + 1];
         hex_encode(ct_hex, ct, sizeof(ct));
-        char ct_body[2 * KYBER_INDCPA_BYTES + 32];
+        char ct_body[2 * KYBER_CIPHERTEXTBYTES + 32];
         snprintf(ct_body, sizeof(ct_body), "{\"ct_hex\":\"%s\"}", ct_hex);
 
         /* ── Receiver side: collect k partial decryptions. ── */
@@ -364,31 +379,27 @@ main(void)
         }
 
         int kem_success = 0;
-        uint8_t recovered_m[KYBER_MSGBYTES] = {0};
+        uint8_t ss_dec[KYBER_SSBYTES] = {0};
         if (collected == k)
         {
-            poly v;
-            poly_decompress(&v, ct + KYBER_POLYVECCOMPRESSEDBYTES);
-            threshold_finish_decrypt(recovered_m, partials, xs, k, &v);
-            kem_success = (memcmp(recovered_m, m, sizeof(m)) == 0);
+            threshold_decaps(ss_dec, partials, xs, k, ct, ek, z);
+            kem_success = (memcmp(ss_dec, ss_enc, sizeof(ss_enc)) == 0);
         }
         total_kem_success += kem_success;
 
-        /* ── AES-256-GCM round trip, keyed from each side's view of m.
-         * A wrong reconstruction fails tag verification here rather
-         * than silently decrypting to garbage. ── */
-        uint8_t aes_key_enc[AES_KEY_LEN], aes_key_dec[AES_KEY_LEN];
-        sha3_256(aes_key_enc, m, sizeof(m));
-        sha3_256(aes_key_dec, recovered_m, sizeof(recovered_m));
-
+        /* ── AES-256-GCM round trip, keyed directly from each side's
+         * shared secret -- ML-KEM's output is already meant to be used
+         * this way, no extra KDF needed. A wrong reconstruction fails
+         * tag verification here rather than silently decrypting to
+         * garbage. ── */
         unsigned char iv[IV_LEN];
         RAND_bytes(iv, IV_LEN);
         unsigned char ct_aes[MAX_MSG_LEN];
         unsigned char tag[TAG_LEN];
-        int ct_len = aes_gcm_encrypt((const unsigned char *)msg, msg_len, aes_key_enc, iv, ct_aes, tag);
+        int ct_len = aes_gcm_encrypt((const unsigned char *)msg, msg_len, ss_enc, iv, ct_aes, tag);
 
         unsigned char pt[MAX_MSG_LEN];
-        int pt_len = aes_gcm_decrypt(ct_aes, ct_len, aes_key_dec, iv, tag, pt);
+        int pt_len = aes_gcm_decrypt(ct_aes, ct_len, ss_dec, iv, tag, pt);
 
         int aes_success = 0;
         char decrypted[MAX_MSG_LEN] = {0};

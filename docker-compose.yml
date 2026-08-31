@@ -1,18 +1,32 @@
-# ── Threshold ML-KEM-768 decryption — 3-of-5 multi-container demo ───────────
+# ── Threshold ML-KEM-768 decapsulation — 3-of-5 multi-container demo ────────
+#
+# Real, full CCA-secure ML-KEM-768 (the Fujisaki-Okamoto-wrapped KEM,
+# src/kyber/kem.c) with a Shamir-shared secret key, not the bare IND-CPA
+# PKE. See src/kyber/README.md's "Phase 5" section for the one explicit,
+# narrower trust assumption this makes (the coordinator briefly sees the
+# decrypted message while finishing the FO check) versus full
+# generic-MPC threshold cryptography.
 #
 # Startup order:
 #   1. sh1..sh5 start (shareholder HTTP servers)
-#   2. dealer       generates a real Kyber keypair, Shamir-shares the secret
-#                   key's 768 NTT-domain coefficients over Z_3329, sends one
-#                   share to each sh*, and writes the public key to
-#                   ./data/pk.bin for the coordinator to pick up
-#   3. coordinator  runs 200 trials of: encapsulate a random value with the
-#                   public key -> collect k partial decryptions over HTTP ->
-#                   Lagrange-combine -> AES-256-GCM round trip keyed from the
-#                   result. Writes results to ./data/results.csv
+#   2. dealer       generates a real ML-KEM-768 KEM keypair (ek, dk),
+#                   Shamir-shares dk's PKE component -- 768 NTT-domain
+#                   coefficients over Z_3329 -- sends one share to each
+#                   sh*, and writes ek to ./data/ek.bin and z (the
+#                   implicit-rejection value) to ./data/z.bin for the
+#                   coordinator to pick up
+#   3. coordinator  runs 200 trials of: real ML-KEM-768 Encaps with ek ->
+#                   collect k partial decryptions over HTTP ->
+#                   threshold_decaps (Lagrange-combine + finish the FO
+#                   check) -> AES-256-GCM round trip keyed directly from
+#                   the KEM's shared secret. Writes results to
+#                   ./data/results.csv
 #
-# No party, including the dealer after it exits, ever holds the whole
-# secret key again -- only individual shares exist from that point on.
+# No party, including the dealer after it exits, ever holds dk (the
+# private key) again -- only individual shares exist from that point on.
+# The coordinator does hold ek and z, which is expected: z isn't part of
+# the private key, it's needed for Decaps by whichever party finishes
+# it, threshold or not.
 #
 # Running it:
 #   docker compose up -d && docker wait coordinator && docker compose logs coordinator
@@ -95,9 +109,10 @@ services:
     environment:
       SHAREHOLDER_HOSTS: "sh1,sh2,sh3,sh4,sh5"
       SHAREHOLDER_PORT:  "8080"
-      PUBKEY_PATH:       "/data/pk.bin"
+      EK_PATH:           "/data/ek.bin"
+      Z_PATH:            "/data/z.bin"
     volumes:
-      - ./data:/data                # pk.bin appears here for the coordinator
+      - ./data:/data                # ek.bin, z.bin appear here for the coordinator
     depends_on: [sh1, sh2, sh3, sh4, sh5]
     restart: "no"
 
@@ -114,7 +129,8 @@ services:
       SHAREHOLDER_PORT:  "8080"
       N_TRIALS:          "200"
       OUTPUT_FILE:       "/data/results.csv"
-      PUBKEY_PATH:       "/data/pk.bin"
+      EK_PATH:           "/data/ek.bin"
+      Z_PATH:            "/data/z.bin"
       # USE_HOSTS: "sh1,sh3,sh5"   # uncomment to pick a specific subset
     volumes:
       - ./data:/data                # results.csv appears in ./data/ on host

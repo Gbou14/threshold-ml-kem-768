@@ -1,13 +1,19 @@
 /*
- * dealer.c — real ML-KEM-768 keypair generation + threshold secret-key
- * splitting.
+ * dealer.c — real, full CCA-secure ML-KEM-768 keypair generation +
+ * threshold secret-key splitting.
  *
- * Generates a Kyber keypair, Shamir-shares the secret key's 768
- * NTT-domain coefficients over Z_3329 (src/kyber/threshold.c), sends
- * one share to each shareholder over HTTP, and writes the public key
- * to a shared volume for the coordinator to pick up. No party --
- * including the dealer, after this process exits -- retains the whole
- * secret key; only individual shares exist from here on.
+ * Generates a Kyber KEM keypair (ek, dk), Shamir-shares dk's PKE
+ * component -- its 768 NTT-domain coefficients over Z_3329
+ * (src/kyber/threshold.c) -- sends one share to each shareholder over
+ * HTTP, and writes ek and z to a shared volume for the coordinator.
+ * Every shareholder gets only a share; no party, including the dealer
+ * after this process exits, retains the whole private key.
+ *
+ * ek (the encapsulation key) is fully public. z is not the private
+ * key -- it's ML-KEM's implicit-rejection value, needed by whichever
+ * party finishes Decaps, exactly as it would be by a non-threshold
+ * decryptor. See src/kyber/README.md's "Phase 5" section for the
+ * combiner's trust assumption this reflects.
  */
 
 #include <stdio.h>
@@ -18,7 +24,7 @@
 #include <openssl/rand.h>
 
 #include "hexutil.h"
-#include "kyber/indcpa.h"
+#include "kyber/kem.h"
 #include "kyber/threshold.h"
 #include "params.h"
 
@@ -96,6 +102,24 @@ wait_healthy(const char *host, int port)
     fprintf(stderr, "[dealer] WARNING: %s never healthy\n", host);
 }
 
+static int
+write_file(const char *path, const uint8_t *data, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        perror("[dealer] fopen");
+        return -1;
+    }
+    int ok = (fwrite(data, 1, len, f) == len);
+    fclose(f);
+    if (!ok)
+    {
+        fprintf(stderr, "[dealer] short write to %s\n", path);
+    }
+    return ok ? 0 : -1;
+}
+
 int
 main(void)
 {
@@ -104,10 +128,12 @@ main(void)
 
     const char *hosts_str = getenv("SHAREHOLDER_HOSTS");
     const char *port_str = getenv("SHAREHOLDER_PORT");
-    const char *pk_path_env = getenv("PUBKEY_PATH");
+    const char *ek_path_env = getenv("EK_PATH");
+    const char *z_path_env = getenv("Z_PATH");
     int sh_port = port_str ? atoi(port_str) : 8080;
     const char *hosts_csv = hosts_str ? hosts_str : "sh1,sh2,sh3,sh4,sh5";
-    const char *pk_path = pk_path_env ? pk_path_env : "/data/pk.bin";
+    const char *ek_path = ek_path_env ? ek_path_env : "/data/ek.bin";
+    const char *z_path = z_path_env ? z_path_env : "/data/z.bin";
 
     char hosts[N_PARTIES][MAX_HOST_LEN];
     int hcount = parse_hosts(hosts_csv, hosts, N_PARTIES);
@@ -117,44 +143,37 @@ main(void)
         return 1;
     }
 
-    /* Step 1: real ML-KEM-768 keypair. */
-    uint8_t keygen_coins[KYBER_SYMBYTES];
+    /* Step 1: real, full CCA-secure ML-KEM-768 keypair. */
+    uint8_t keygen_coins[2 * KYBER_SYMBYTES];
     if (RAND_bytes(keygen_coins, sizeof(keygen_coins)) != 1)
     {
         fprintf(stderr, "[dealer] RAND_bytes failed\n");
         return 1;
     }
-    uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES];
-    uint8_t sk[KYBER_INDCPA_SECRETKEYBYTES];
-    indcpa_keypair_derand(pk, sk, keygen_coins);
+    uint8_t ek[KYBER_PUBLICKEYBYTES];
+    uint8_t dk[KYBER_SECRETKEYBYTES];
+    kyber_keypair_derand(ek, dk, keygen_coins);
+    const uint8_t *z = dk + KYBER_INDCPA_SECRETKEYBYTES + KYBER_PUBLICKEYBYTES + KYBER_SYMBYTES;
 
     polyvec skpv;
-    polyvec_frombytes(&skpv, sk);
+    polyvec_frombytes(&skpv, dk); /* dk's first bytes are dkPKE */
 
     printf("[dealer] generated ML-KEM-768 keypair (%d-of-%d threshold)\n", THRESHOLD, N_PARTIES);
     fflush(stdout);
 
-    /* Step 2: Shamir-share the secret key's NTT-domain coefficients.
-     * sk itself is never written anywhere from this point on -- only
-     * the shares below leave this process. */
+    /* Step 2: Shamir-share dkPKE's NTT-domain coefficients. dk itself
+     * is never written anywhere from this point on -- only the shares
+     * below (and the separately-handled z, see the file comment)
+     * leave this process. */
     polyvec shares[N_PARTIES];
     threshold_split_secret(&skpv, shares, THRESHOLD, N_PARTIES);
 
-    /* Step 3: publish the public key for the coordinator to pick up. */
-    FILE *pkf = fopen(pk_path, "wb");
-    if (!pkf)
+    /* Step 3: publish ek and z for the coordinator to pick up. */
+    if (write_file(ek_path, ek, sizeof(ek)) != 0 || write_file(z_path, z, KYBER_SYMBYTES) != 0)
     {
-        perror("[dealer] fopen pk_path");
         return 1;
     }
-    if (fwrite(pk, 1, sizeof(pk), pkf) != sizeof(pk))
-    {
-        fprintf(stderr, "[dealer] short write of public key\n");
-        fclose(pkf);
-        return 1;
-    }
-    fclose(pkf);
-    printf("[dealer] wrote public key (%zu bytes) to %s\n", sizeof(pk), pk_path);
+    printf("[dealer] wrote ek (%zu bytes) to %s, z (%d bytes) to %s\n", sizeof(ek), ek_path, KYBER_SYMBYTES, z_path);
     fflush(stdout);
 
     /* Step 4: distribute shares over HTTP once shareholders are up. */

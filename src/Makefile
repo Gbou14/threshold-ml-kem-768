@@ -5,7 +5,7 @@ LD_CURL = -lcurl
 LD_SSL  = -lssl -lcrypto
 
 KYBER_SRCS = kyber/reduce.c kyber/ntt.c kyber/cbd.c kyber/poly.c kyber/shake.c \
-             kyber/polyvec.c kyber/indcpa.c kyber/threshold.c
+             kyber/polyvec.c kyber/indcpa.c kyber/kem.c kyber/threshold.c
 KYBER_OBJS = $(KYBER_SRCS:.c=.o)
 KYBER_HDRS = $(wildcard kyber/*.h)
 
