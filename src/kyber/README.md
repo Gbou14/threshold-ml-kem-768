@@ -48,8 +48,9 @@ and why it's the honest scope rather than the full research problem.
 
 ## Validation
 
-`test/test_primitives.c` is a self-contained regression test (`make test`)
--- no external dependency, run it after any change here.
+`make test` builds and runs four self-contained regression suites --
+`test_primitives`, `test_indcpa`, `test_threshold`, `test_kem` -- with no
+external dependency at run time. Run it after any change here.
 
 Those pinned values came from a byte-for-byte diff against the
 public-domain pq-crystals/kyber reference implementation, run once during
@@ -137,6 +138,22 @@ re-encrypt, compare, select) is written once and used by both
 invntt bug two sections down, duplicating this logic by hand a second
 time was not a risk worth taking again.
 
+## Live end-to-end proof
+
+Beyond the unit tests, the full system runs as five separate Docker
+containers (shareholders) plus a dealer and a coordinator, talking over
+real HTTP -- see `../../docker-compose.yml`. As of the run on
+2026-08-31: dealer generates a real ML-KEM-768 KEM keypair, Shamir-splits
+the secret key, publishes `ek.bin` (1184 bytes) and `z.bin` (32 bytes);
+coordinator runs 200 trials of real `kyber_encaps_derand` ->
+network round-trip to 3 of the 5 shareholders for partial decryptions ->
+`threshold_decaps` -> AES-256-GCM keyed directly from the result.
+**200/200 KEM successes, 200/200 AES successes.** No party other than
+the coordinator ever held `ek`/`z`, and no party ever held the private
+key or a share other than its own. Re-run it yourself with
+`docker compose up -d && docker wait coordinator && cat data/results.csv`
+from the project root.
+
 ## A real bug this caught
 
 `ntt()`/`invntt()`/`poly_basemul_montgomery()` all read a `zetas[128]`
@@ -164,3 +181,14 @@ than stopping at intermediate polynomial equality. Fixed by moving the
 whole tail sequence (combine, invntt, subtract, reduce, decode) into one
 function, `threshold_finish_decrypt`, so it can't be re-derived
 incorrectly at each call site.
+
+A third bug, wiring `kem.c` into the Docker demo: `src/Makefile` (the
+one the Docker build actually uses -- separate from this directory's
+own `Makefile` for `make test`) still listed the old set of kyber source
+files without `kem.c`, so `threshold_decaps`'s call to
+`kyber_decaps_from_m` failed to link. Local ad-hoc compiles didn't catch
+it because they'd been assembling object file lists by hand and happened
+to include `kem.o`. Only surfaced on a genuinely clean `docker compose
+build` -- a good reminder that "compiles for me locally" and "compiles
+from the actual build definition" are different claims, and only one of
+them is what a reader can reproduce.

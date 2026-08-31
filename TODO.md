@@ -92,9 +92,18 @@ See project discussion notes for the CPA-vs-CCA and "quantum-safe" framing.
       generic MPC over the FO check, or a threshold-friendly KEM
       redesign that avoids it structurally. Multi-month-scale systems
       research on its own -- see README for the survey of approaches
-- [ ] Wire kem.c/threshold_decaps into the Docker demo (currently still
-      uses the IND-CPA-only path from Phase 4) -- straightforward next
-      step if wanted, not yet done
+- [x] Wire kem.c/threshold_decaps into the Docker demo
+  - Dealer now publishes ek.bin (1184 bytes) + z.bin (32 bytes) instead
+    of a bare IND-CPA pk.bin; coordinator does real kyber_encaps_derand
+    + threshold_decaps instead of indcpa_enc + threshold_finish_decrypt;
+    AES-256-GCM key is now the KEM's shared secret used directly (no
+    separate KDF step needed once the KEM does that internally)
+  - shareholder.c needed zero changes -- confirms the shareholder's role
+    is properly isolated from the FO-transform complexity
+  - Live run, 2026-08-31: 200/200 trials, full threshold Decaps (not
+    just IND-CPA) + the AES round trip it gates, across 5 real
+    containers over HTTP. ek.bin/z.bin sizes confirmed exact
+    (1184/32 bytes) on disk after the run
 
 ## Notes for future sessions
 
