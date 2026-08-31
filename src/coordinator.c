@@ -1,11 +1,18 @@
 /*
- * coordinator.c — threshold decryption using real ssss + OpenSSL AES-256-GCM
+ * coordinator.c — threshold ML-KEM-768 decapsulation + AES-256-GCM demo
  *
- * 1. Collects ssss share strings from THRESHOLD shareholders via GET /get_share
- * 2. Reconstructs the AES-256 key using ssss-combine
- * 3. Encrypts N_TRIALS messages with AES-256-GCM
- * 4. Decrypts and verifies each one
- * 5. Writes results to CSV
+ * Each trial:
+ *   1. Generate a random 32-byte value m and encapsulate it with the
+ *      dealer's public key (indcpa_enc) -- this is the "sender" role.
+ *   2. Send the ciphertext to k shareholders' /partial_decrypt; collect
+ *      their partial decryptions.
+ *   3. Lagrange-combine the k partials to recover m -- this is the
+ *      "receiver" role, and never touches the secret key, only shares
+ *      of it via the shareholders' responses.
+ *   4. Derive an AES-256 key from each side's view of m (SHA3-256) and
+ *      run an authenticated encrypt/decrypt round-trip, so a wrong
+ *      reconstruction fails GCM tag verification rather than silently
+ *      producing garbage.
  *
  * ENV:
  *   THRESHOLD           (default: 3)
@@ -14,31 +21,41 @@
  *   USE_HOSTS           optional subset (e.g. "sh1,sh3,sh5")
  *   N_TRIALS            number of trials (default: 200)
  *   OUTPUT_FILE         CSV path (default: /data/results.csv)
+ *   PUBKEY_PATH         where the dealer wrote pk (default: /data/pk.bin)
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <time.h>
 #include <curl/curl.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include "hexutil.h"
+#include "kyber/indcpa.h"
+#include "kyber/shake.h"
+#include "kyber/threshold.h"
 #include "params.h"
 
-#define MAX_HOST_LEN  64
-#define AES_KEY_LEN   32
-#define IV_LEN        16
-#define TAG_LEN       16
-#define MAX_MSG_LEN   256
+#define MAX_HOST_LEN 64
+#define AES_KEY_LEN 32
+#define IV_LEN 16
+#define TAG_LEN 16
+#define MAX_MSG_LEN 256
 
 /* ── HTTP helpers ─────────────────────────────────────────────────────────── */
-typedef struct { char *data; size_t len; } Buffer;
+typedef struct
+{
+    char *data;
+    size_t len;
+} Buffer;
 
-static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
+static size_t
+write_cb(void *ptr, size_t size, size_t nmemb, void *ud)
+{
     size_t total = size * nmemb;
-    Buffer *b = (Buffer*)ud;
+    Buffer *b = (Buffer *)ud;
     b->data = realloc(b->data, b->len + total + 1);
     memcpy(b->data + b->len, ptr, total);
     b->len += total;
@@ -46,42 +63,69 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     return total;
 }
 
-static int http_get(const char *url, char *resp_buf, size_t resp_max) {
+/* POST json to url, capturing the response body into resp_buf. Returns
+ * 0 on success (HTTP 200), -1 otherwise. */
+static int
+http_post_json(const char *url, const char *json, char *resp_buf, size_t resp_max)
+{
     Buffer buf = {NULL, 0};
     CURL *curl = curl_easy_init();
-    if (!curl) return -1;
-    curl_easy_setopt(curl, CURLOPT_URL,           url);
+    if (!curl)
+    {
+        return -1;
+    }
+    struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       5L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,3L);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
     CURLcode res = curl_easy_perform(curl);
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
-    if (res != CURLE_OK || code != 200) { free(buf.data); return -1; }
-    if (buf.data && resp_buf) {
-        strncpy(resp_buf, buf.data, resp_max-1);
-        resp_buf[resp_max-1] = '\0';
+    if (res != CURLE_OK || code != 200)
+    {
+        free(buf.data);
+        return -1;
+    }
+    if (buf.data && resp_buf)
+    {
+        strncpy(resp_buf, buf.data, resp_max - 1);
+        resp_buf[resp_max - 1] = '\0';
     }
     free(buf.data);
     return 0;
 }
 
-static int parse_hosts(const char *csv, char hosts[][MAX_HOST_LEN], int max) {
-    char tmp[1024]; strncpy(tmp, csv, sizeof(tmp)-1); tmp[sizeof(tmp)-1]='\0';
-    int count = 0; char *tok = strtok(tmp, ",");
-    while (tok && count < max) {
-        strncpy(hosts[count], tok, MAX_HOST_LEN-1);
-        hosts[count][MAX_HOST_LEN-1]='\0'; count++; tok=strtok(NULL,",");
+static int
+parse_hosts(const char *csv, char hosts[][MAX_HOST_LEN], int max)
+{
+    char tmp[1024];
+    strncpy(tmp, csv, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    int count = 0;
+    char *tok = strtok(tmp, ",");
+    while (tok && count < max)
+    {
+        strncpy(hosts[count], tok, MAX_HOST_LEN - 1);
+        hosts[count][MAX_HOST_LEN - 1] = '\0';
+        count++;
+        tok = strtok(NULL, ",");
     }
     return count;
 }
 
-static void wait_for_share(const char *host, int port) {
+static void
+wait_healthy(const char *host, int port)
+{
     char url[256];
     snprintf(url, sizeof(url), "http://%s:%d/health", host, port);
-    for (int i = 0; i < 60; i++) {
+    for (int i = 0; i < 60; i++)
+    {
         CURL *c = curl_easy_init();
         curl_easy_setopt(c, CURLOPT_URL, url);
         curl_easy_setopt(c, CURLOPT_TIMEOUT, 2L);
@@ -91,71 +135,84 @@ static void wait_for_share(const char *host, int port) {
         long code = 0;
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
         curl_easy_cleanup(c);
-        if (res == CURLE_OK && code == 200) return;
+        if (res == CURLE_OK && code == 200)
+        {
+            return;
+        }
         sleep(1);
     }
 }
 
-/* Parse "share" field from JSON like {"party_index":0,"share":"1-abc..."} */
-static int parse_share(const char *json, char *share_out, size_t max) {
-    const char *p = strstr(json, "\"share\"");
-    if (!p) return -1;
-    p = strchr(p, ':');
-    if (!p) return -1;
-    p++;
-    while (*p == ' ' || *p == '"') p++;
+/* Parse {"x":N,"partial_hex":"..."} */
+static int
+parse_partial_response(const char *json, int *x_out, uint8_t partial_bytes[KYBER_POLYBYTES])
+{
+    const char *xp = strstr(json, "\"x\"");
+    if (!xp)
+    {
+        return -1;
+    }
+    xp = strchr(xp, ':');
+    if (!xp)
+    {
+        return -1;
+    }
+    *x_out = atoi(xp + 1);
+
+    const char *hp = strstr(json, "\"partial_hex\"");
+    if (!hp)
+    {
+        return -1;
+    }
+    hp = strchr(hp, ':');
+    if (!hp)
+    {
+        return -1;
+    }
+    hp++;
+    while (*hp == ' ' || *hp == '"')
+    {
+        hp++;
+    }
+    char hex[2 * KYBER_POLYBYTES + 1];
     size_t j = 0;
-    while (*p && *p != '"' && j < max-1)
-        share_out[j++] = *p++;
-    share_out[j] = '\0';
-    return j > 0 ? 0 : -1;
-}
-
-/* Run ssss-combine with k share strings, return reconstructed hex key */
-static int run_ssss_combine(char shares[][256], int k, char *hex_out, size_t hex_max) {
-    /* Write shares to a temp file then pipe through ssss-combine */
-    FILE *tmp = fopen("/tmp/shares.txt", "w");
-    if (!tmp) { perror("[coord] fopen shares.txt"); return -1; }
-    for (int i = 0; i < k; i++)
-        fprintf(tmp, "%s\n", shares[i]);
-    fclose(tmp);
-
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "ssss-combine -t %d -x -q < /tmp/shares.txt 2>&1",
-             k);
-
-    FILE *fp = popen(cmd, "r");
-    if (!fp) { perror("[coord] popen ssss-combine"); return -1; }
-
-    char line[256] = {0};
-    int got = (fgets(line, sizeof(line), fp) != NULL);
-    if (got) {
-        line[strcspn(line, "\n")] = '\0';
-        strncpy(hex_out, line, hex_max-1);
-        hex_out[hex_max-1] = '\0';
+    while (*hp && *hp != '"' && j < sizeof(hex) - 1)
+    {
+        hex[j++] = *hp++;
     }
-    pclose(fp);
-    unlink("/tmp/shares.txt");
-    return strlen(hex_out) > 0 ? 0 : -1;
+    hex[j] = '\0';
+    return hex_decode(partial_bytes, KYBER_POLYBYTES, hex);
 }
 
-/* Convert hex string to bytes */
-static int hex_to_bytes(const char *hex, unsigned char *out, size_t out_len) {
-    size_t hex_len = strlen(hex);
-    if (hex_len != out_len * 2) return -1;
-    for (size_t i = 0; i < out_len; i++) {
-        unsigned int byte;
-        if (sscanf(hex + i*2, "%02x", &byte) != 1) return -1;
-        out[i] = (unsigned char)byte;
+/* Wait for the dealer to publish the public key. */
+static int
+wait_for_pubkey(const char *path, uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES])
+{
+    for (int i = 0; i < 120; i++)
+    {
+        FILE *f = fopen(path, "rb");
+        if (f)
+        {
+            size_t n = fread(pk, 1, KYBER_INDCPA_PUBLICKEYBYTES, f);
+            fclose(f);
+            if (n == KYBER_INDCPA_PUBLICKEYBYTES)
+            {
+                return 0;
+            }
+        }
+        sleep(1);
     }
-    return 0;
+    return -1;
 }
 
-/* AES-256-GCM encrypt */
-static int aes_gcm_encrypt(const unsigned char *pt, int pt_len,
-                            const unsigned char *key, const unsigned char *iv,
-                            unsigned char *ct, unsigned char *tag) {
+static int
+aes_gcm_encrypt(const unsigned char *pt,
+                 int pt_len,
+                 const unsigned char *key,
+                 const unsigned char *iv,
+                 unsigned char *ct,
+                 unsigned char *tag)
+{
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     int len, ct_len;
     EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
@@ -170,10 +227,14 @@ static int aes_gcm_encrypt(const unsigned char *pt, int pt_len,
     return ct_len;
 }
 
-/* AES-256-GCM decrypt */
-static int aes_gcm_decrypt(const unsigned char *ct, int ct_len,
-                            const unsigned char *key, const unsigned char *iv,
-                            const unsigned char *tag, unsigned char *pt) {
+static int
+aes_gcm_decrypt(const unsigned char *ct,
+                 int ct_len,
+                 const unsigned char *key,
+                 const unsigned char *iv,
+                 const unsigned char *tag,
+                 unsigned char *pt)
+{
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     int len, pt_len, ret;
     EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
@@ -181,33 +242,42 @@ static int aes_gcm_decrypt(const unsigned char *ct, int ct_len,
     EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv);
     EVP_DecryptUpdate(ctx, pt, &len, ct, ct_len);
     pt_len = len;
-    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN, (void*)tag);
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN, (void *)tag);
     ret = EVP_DecryptFinal_ex(ctx, pt + len, &len);
     EVP_CIPHER_CTX_free(ctx);
-    if (ret > 0) { pt_len += len; return pt_len; }
+    if (ret > 0)
+    {
+        pt_len += len;
+        return pt_len;
+    }
     return -1;
 }
 
-int main(void) {
-    srand((unsigned)time(NULL));
-
-    const char *k_str       = getenv("THRESHOLD");
-    const char *hosts_str   = getenv("SHAREHOLDER_HOSTS");
-    const char *use_str     = getenv("USE_HOSTS");
-    const char *port_str    = getenv("SHAREHOLDER_PORT");
+int
+main(void)
+{
+    const char *k_str = getenv("THRESHOLD");
+    const char *hosts_str = getenv("SHAREHOLDER_HOSTS");
+    const char *use_str = getenv("USE_HOSTS");
+    const char *port_str = getenv("SHAREHOLDER_PORT");
     const char *ntrials_str = getenv("N_TRIALS");
-    const char *outfile     = getenv("OUTPUT_FILE");
+    const char *outfile = getenv("OUTPUT_FILE");
+    const char *pk_path_env = getenv("PUBKEY_PATH");
 
-    int k       = k_str       ? atoi(k_str)       : THRESHOLD;
-    int sh_port = port_str    ? atoi(port_str)    : 8080;
+    int k = k_str ? atoi(k_str) : THRESHOLD;
+    int sh_port = port_str ? atoi(port_str) : 8080;
     int ntrials = ntrials_str ? atoi(ntrials_str) : 200;
-    if (!outfile) outfile = "/data/results.csv";
+    if (!outfile)
+    {
+        outfile = "/data/results.csv";
+    }
+    const char *pk_path = pk_path_env ? pk_path_env : "/data/pk.bin";
 
-    const char *hosts_csv = use_str ? use_str :
-                            hosts_str ? hosts_str : "sh1,sh2,sh3,sh4,sh5";
+    const char *hosts_csv = use_str ? use_str : (hosts_str ? hosts_str : "sh1,sh2,sh3,sh4,sh5");
     char hosts[N_PARTIES][MAX_HOST_LEN];
     int hcount = parse_hosts(hosts_csv, hosts, N_PARTIES);
-    if (hcount < k) {
+    if (hcount < k)
+    {
         fprintf(stderr, "[coord] need at least %d hosts, got %d\n", k, hcount);
         return 1;
     }
@@ -216,109 +286,131 @@ int main(void) {
     printf("[coord] Threshold=%d  Trials=%d  Output=%s\n", k, ntrials, outfile);
     fflush(stdout);
 
+    printf("[coord] Waiting for dealer's public key at %s...\n", pk_path);
+    fflush(stdout);
+    uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES];
+    if (wait_for_pubkey(pk_path, pk) != 0)
+    {
+        fprintf(stderr, "[coord] public key never appeared at %s\n", pk_path);
+        return 1;
+    }
+    printf("[coord] Loaded public key.\n");
+    fflush(stdout);
+
     curl_global_init(CURL_GLOBAL_DEFAULT);
-
-    /* Wait for shareholders to be ready */
-    for (int i = 0; i < k; i++) wait_for_share(hosts[i], sh_port);
-    sleep(120); /* wait for dealer to finish distributing shares */
-
-    /* ── Step 1: Collect shares from k shareholders ── */
-    printf("[coord] Collecting shares from %d shareholders...\n", k);
-    fflush(stdout);
-
-    char share_strings[N_PARTIES][256];
-    int collected = 0;
-    for (int i = 0; i < hcount && collected < k; i++) {
-        char url[256], resp[512];
-        snprintf(url, sizeof(url), "http://%s:%d/get_share", hosts[i], sh_port);
-        if (http_get(url, resp, sizeof(resp)) == 0) {
-            if (parse_share(resp, share_strings[collected], 256) == 0) {
-                printf("[coord] Got share from %s: %s\n",
-                       hosts[i], share_strings[collected]);
-                fflush(stdout);
-                collected++;
-            }
-        }
+    for (int i = 0; i < k; i++)
+    {
+        wait_healthy(hosts[i], sh_port);
     }
 
-    if (collected < k) {
-        fprintf(stderr, "[coord] only got %d/%d shares, aborting\n", collected, k);
-        return 1;
-    }
-
-    /* ── Step 2: Reconstruct AES key via ssss-combine ── */
-    printf("[coord] Reconstructing AES key with ssss-combine...\n");
-    fflush(stdout);
-
-    char hex_key[128] = {0};
-    if (run_ssss_combine(share_strings, k, hex_key, sizeof(hex_key)) != 0) {
-        fprintf(stderr, "[coord] ssss-combine failed\n");
-        return 1;
-    }
-    printf("[coord] Reconstructed AES key: %s\n", hex_key);
-    fflush(stdout);
-
-    unsigned char aes_key[AES_KEY_LEN];
-    if (hex_to_bytes(hex_key, aes_key, AES_KEY_LEN) != 0) {
-        fprintf(stderr, "[coord] hex_to_bytes failed (key len=%zu)\n", strlen(hex_key));
-        return 1;
-    }
-
-    /* ── Step 3: Run N_TRIALS encrypt/decrypt trials ── */
     FILE *fp = fopen(outfile, "w");
-    if (!fp) { perror("fopen"); return 1; }
-    fprintf(fp, "trial,message,decrypted,success\n");
+    if (!fp)
+    {
+        perror("fopen");
+        return 1;
+    }
+    fprintf(fp, "trial,kem_success,aes_success,message,decrypted\n");
 
-    int total_success = 0;
-    const char *messages[] = {
-        "Hello from threshold crypto!",
-        "AES-256-GCM with ssss key sharing",
-        "Post-quantum ready architecture",
-        "3-of-5 threshold decryption",
-        "OpenSSL + ssss integration"
-    };
+    const char *messages[] = {"Hello from threshold Kyber!",
+                               "ML-KEM-768 + Shamir key sharing",
+                               "Post-quantum threshold decryption",
+                               "3-of-5 threshold decapsulation",
+                               "Real Kyber, not the toy LWE"};
     int n_messages = 5;
 
-    for (int trial = 0; trial < ntrials; trial++) {
+    int total_kem_success = 0, total_aes_success = 0;
+
+    for (int trial = 0; trial < ntrials; trial++)
+    {
         const char *msg = messages[trial % n_messages];
         int msg_len = (int)strlen(msg);
 
-        /* Generate fresh random IV for each trial */
-        unsigned char iv[IV_LEN];
-        RAND_bytes(iv, IV_LEN);
+        /* ── Sender side: encapsulate a fresh random value m. ── */
+        uint8_t m[KYBER_MSGBYTES];
+        uint8_t enc_coins[KYBER_SYMBYTES];
+        RAND_bytes(m, sizeof(m));
+        RAND_bytes(enc_coins, sizeof(enc_coins));
 
-        /* Encrypt */
-        unsigned char ct[MAX_MSG_LEN];
-        unsigned char tag[TAG_LEN];
-        int ct_len = aes_gcm_encrypt((unsigned char*)msg, msg_len,
-                                      aes_key, iv, ct, tag);
+        uint8_t ct[KYBER_INDCPA_BYTES];
+        indcpa_enc(ct, m, pk, enc_coins);
 
-        /* Decrypt */
-        unsigned char pt[MAX_MSG_LEN];
-        int pt_len = aes_gcm_decrypt(ct, ct_len, aes_key, iv, tag, pt);
+        char ct_hex[2 * KYBER_INDCPA_BYTES + 1];
+        hex_encode(ct_hex, ct, sizeof(ct));
+        char ct_body[2 * KYBER_INDCPA_BYTES + 32];
+        snprintf(ct_body, sizeof(ct_body), "{\"ct_hex\":\"%s\"}", ct_hex);
 
-        int success = 0;
-        char decrypted[MAX_MSG_LEN] = {0};
-        if (pt_len > 0) {
-            pt[pt_len] = '\0';
-            strncpy(decrypted, (char*)pt, MAX_MSG_LEN-1);
-            success = (strcmp(msg, decrypted) == 0);
+        /* ── Receiver side: collect k partial decryptions. ── */
+        poly partials[N_PARTIES];
+        int xs[N_PARTIES];
+        int collected = 0;
+        for (int i = 0; i < hcount && collected < k; i++)
+        {
+            char url[256];
+            snprintf(url, sizeof(url), "http://%s:%d/partial_decrypt", hosts[i], sh_port);
+            char resp[2 * KYBER_POLYBYTES + 64];
+            if (http_post_json(url, ct_body, resp, sizeof(resp)) != 0)
+            {
+                continue;
+            }
+            uint8_t partial_bytes[KYBER_POLYBYTES];
+            int x;
+            if (parse_partial_response(resp, &x, partial_bytes) != 0)
+            {
+                continue;
+            }
+            poly_frombytes(&partials[collected], partial_bytes);
+            xs[collected] = x;
+            collected++;
         }
 
-        fprintf(fp, "%d,\"%s\",\"%s\",%d\n",
-                trial, msg, decrypted, success);
-        total_success += success;
+        int kem_success = 0;
+        uint8_t recovered_m[KYBER_MSGBYTES] = {0};
+        if (collected == k)
+        {
+            poly v;
+            poly_decompress(&v, ct + KYBER_POLYVECCOMPRESSEDBYTES);
+            threshold_finish_decrypt(recovered_m, partials, xs, k, &v);
+            kem_success = (memcmp(recovered_m, m, sizeof(m)) == 0);
+        }
+        total_kem_success += kem_success;
+
+        /* ── AES-256-GCM round trip, keyed from each side's view of m.
+         * A wrong reconstruction fails tag verification here rather
+         * than silently decrypting to garbage. ── */
+        uint8_t aes_key_enc[AES_KEY_LEN], aes_key_dec[AES_KEY_LEN];
+        sha3_256(aes_key_enc, m, sizeof(m));
+        sha3_256(aes_key_dec, recovered_m, sizeof(recovered_m));
+
+        unsigned char iv[IV_LEN];
+        RAND_bytes(iv, IV_LEN);
+        unsigned char ct_aes[MAX_MSG_LEN];
+        unsigned char tag[TAG_LEN];
+        int ct_len = aes_gcm_encrypt((const unsigned char *)msg, msg_len, aes_key_enc, iv, ct_aes, tag);
+
+        unsigned char pt[MAX_MSG_LEN];
+        int pt_len = aes_gcm_decrypt(ct_aes, ct_len, aes_key_dec, iv, tag, pt);
+
+        int aes_success = 0;
+        char decrypted[MAX_MSG_LEN] = {0};
+        if (pt_len > 0)
+        {
+            pt[pt_len] = '\0';
+            strncpy(decrypted, (char *)pt, MAX_MSG_LEN - 1);
+            aes_success = (strcmp(msg, decrypted) == 0);
+        }
+        total_aes_success += aes_success;
+
+        fprintf(fp, "%d,%d,%d,\"%s\",\"%s\"\n", trial, kem_success, aes_success, msg, decrypted);
     }
 
     fclose(fp);
     curl_global_cleanup();
 
-    printf("[coord] Done. %d/%d trials succeeded. Results at %s\n",
-           total_success, ntrials, outfile);
+    printf("[coord] Done. KEM: %d/%d, AES: %d/%d trials succeeded. Results at %s\n",
+           total_kem_success,
+           ntrials,
+           total_aes_success,
+           ntrials,
+           outfile);
     return 0;
 }
-/* Sat Apr 18 09:22:19 PM CDT 2026 */
-/* Sat Apr 18 09:28:08 PM CDT 2026 */
-/* Sat Apr 18 09:32:55 PM CDT 2026 */
-/* Sat Apr 18 09:43:41 PM CDT 2026 */
-/* Sat Apr 18 09:59:27 PM CDT 2026 */

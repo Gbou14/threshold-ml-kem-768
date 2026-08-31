@@ -41,9 +41,29 @@ See project discussion notes for the CPA-vs-CCA and "quantum-safe" framing.
     truth" check and the threshold path independently omitted the same
     step -- only caught by checking final message correctness end to end;
     (2) fixed by consolidating the whole tail into `threshold_finish_decrypt`
-- [ ] Phase 4: Rebuild dealer/shareholder/coordinator Docker flow around real PKE
-  - [ ] Replace `toy_crypto.c` calls with the new Kyber PKE + Shamir layer
-  - [ ] Re-run the docker-compose experiment harness, regenerate results.csv
+- [x] Phase 4: Rebuild dealer/shareholder/coordinator Docker flow around real PKE
+  - Turned out the *existing* dealer/shareholder/coordinator weren't the
+    toy-LWE flow at all -- they'd moved on to splitting a raw AES-256 key
+    with the external `ssss` CLI, with **no public-key encapsulation
+    anywhere**. Replaced that with a real hybrid KEM: dealer generates an
+    ML-KEM-768 keypair, Shamir-shares the secret key (not a bare AES key)
+    via `threshold_split_secret`, writes pk to a shared volume; coordinator
+    does real `indcpa_enc` to encapsulate a fresh 32-byte value, collects k
+    partial decryptions from shareholders over HTTP, Lagrange-combines via
+    `threshold_finish_decrypt`, and uses the result (through SHA3-256) as
+    an AES-256-GCM key -- so a wrong reconstruction fails GCM tag
+    verification instead of silently producing garbage
+  - [x] Removed the `ssss`/`libgmp` dependency entirely; added `hexutil.c`
+        for JSON-safe wire transport of shares/ciphertexts/partials
+  - [x] Fixed a real orchestration bug found while testing: `docker compose
+        up --abort-on-container-exit` treats the dealer's expected exit as
+        a signal to kill the whole stack (shareholders included) regardless
+        of `--exit-code-from` -- documented the correct invocation
+        (`up -d` + `docker wait coordinator`) in docker-compose.yml
+  - [x] Validated live end-to-end in Docker: 200/200 trials, both KEM
+        reconstruction and the AES-256-GCM round trip it gates, across 5
+        real shareholder containers over HTTP; below-threshold subset
+        correctly refuses to run
 - [ ] Phase 5 (stretch/research): CCA-secure threshold decapsulation
   - [ ] Write up precisely why naively extending Phase 3 to the full
         FO-transform Decaps breaks IND-CCA2 (re-encryption check needs

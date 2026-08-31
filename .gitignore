@@ -11,3 +11,10 @@ shamir-docker.tar.gz
 
 # Generated experiment output (regenerable)
 data/*.csv
+data/*.bin
+
+# Compiled Docker-demo binaries
+src/shareholder
+src/dealer
+src/coordinator
+src/test_openssl

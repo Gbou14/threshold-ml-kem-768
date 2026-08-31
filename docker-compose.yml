@@ -1,22 +1,46 @@
-version: "3.9"
-
-# ── Threshold LWE Decryption — 3-of-5 multi-container demo ──────────────────
+# ── Threshold ML-KEM-768 decryption — 3-of-5 multi-container demo ───────────
 #
 # Startup order:
 #   1. sh1..sh5 start (shareholder HTTP servers)
-#   2. dealer    splits keygen s[], sends one share-vector to each sh*
-#   3. coordinator  runs 200 encrypt→partial_decrypt→reconstruct trials
-#                   writes results to ./data/results.csv
+#   2. dealer       generates a real Kyber keypair, Shamir-shares the secret
+#                   key's 768 NTT-domain coefficients over Z_3329, sends one
+#                   share to each sh*, and writes the public key to
+#                   ./data/pk.bin for the coordinator to pick up
+#   3. coordinator  runs 200 trials of: encapsulate a random value with the
+#                   public key -> collect k partial decryptions over HTTP ->
+#                   Lagrange-combine -> AES-256-GCM round trip keyed from the
+#                   result. Writes results to ./data/results.csv
+#
+# No party, including the dealer after it exits, ever holds the whole
+# secret key again -- only individual shares exist from that point on.
+#
+# Running it:
+#   docker compose up -d && docker wait coordinator && docker compose logs coordinator
+#   cat data/results.csv
+#   docker compose down
+#
+# Don't use `docker compose up --abort-on-container-exit` here: dealer is a
+# one-shot job that's *expected* to exit, and --abort-on-container-exit tears
+# down the whole stack (including the shareholders) the moment ANY container
+# exits, regardless of which one -- it'll kill the shareholders out from under
+# the coordinator before it can finish. `docker wait <service>` waits for one
+# specific container instead.
 #
 # Experiments:
 #   # Use a different 3-party subset:
-#   docker compose run -e USE_HOSTS=sh1,sh3,sh5 coordinator
+#   docker compose run --rm -e USE_HOSTS=sh1,sh3,sh5 coordinator
 #
-#   # Test below threshold (will fail to reconstruct correctly):
-#   docker compose run -e USE_HOSTS=sh1,sh2 -e THRESHOLD=3 coordinator
+#   # Test below threshold (will refuse to run, or reconstruct garbage if you
+#   # also bypass the host-count check):
+#   docker compose run --rm -e USE_HOSTS=sh1,sh2 -e THRESHOLD=3 coordinator
 #
 #   # Change trial count:
-#   docker compose run -e N_TRIALS=500 coordinator
+#   docker compose run --rm -e N_TRIALS=500 coordinator
+#
+# Note: `docker compose run coordinator` re-checks the dealer's
+# service_completed_successfully condition and may re-run the dealer first
+# (generating a fresh keypair and re-distributing shares to all 5
+# shareholders) even though you only asked to re-run the coordinator.
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -71,6 +95,9 @@ services:
     environment:
       SHAREHOLDER_HOSTS: "sh1,sh2,sh3,sh4,sh5"
       SHAREHOLDER_PORT:  "8080"
+      PUBKEY_PATH:       "/data/pk.bin"
+    volumes:
+      - ./data:/data                # pk.bin appears here for the coordinator
     depends_on: [sh1, sh2, sh3, sh4, sh5]
     restart: "no"
 
@@ -87,8 +114,11 @@ services:
       SHAREHOLDER_PORT:  "8080"
       N_TRIALS:          "200"
       OUTPUT_FILE:       "/data/results.csv"
+      PUBKEY_PATH:       "/data/pk.bin"
       # USE_HOSTS: "sh1,sh3,sh5"   # uncomment to pick a specific subset
     volumes:
       - ./data:/data                # results.csv appears in ./data/ on host
-    depends_on: [dealer]
+    depends_on:
+      dealer:
+        condition: service_completed_successfully
     restart: "no"
