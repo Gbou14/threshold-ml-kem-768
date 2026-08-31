@@ -60,4 +60,29 @@ void threshold_finish_decrypt(uint8_t msg_out[KYBER_MSGBYTES],
                                int k,
                                const poly *v);
 
+/*
+ * Full CCA-secure threshold Decaps, under an explicit, narrower trust
+ * assumption than the PKE-level functions above: this combiner
+ * momentarily reconstructs m' (the PKE-decrypted message) in order to
+ * complete the Fujisaki-Okamoto re-encryption check, so it must be
+ * trusted not to leak it. No shareholder's share and no party's view
+ * of the private key changes -- only this one combining step is
+ * weaker than a full generic-MPC threshold KEM. See
+ * src/kyber/README.md for why that check can't be done any other way
+ * with the tools built so far.
+ *
+ * z is the secret key's implicit-rejection value (not the private
+ * key itself) -- the combiner needs it for the same reason any party
+ * running ordinary (non-threshold) Decaps needs it: J(z, ct) is part
+ * of Decaps's own logic, not something being newly exposed by
+ * thresholding it.
+ */
+void threshold_decaps(uint8_t ss[KYBER_SSBYTES],
+                       const poly *partials,
+                       const int *xs,
+                       int k,
+                       const uint8_t ct[KYBER_CIPHERTEXTBYTES],
+                       const uint8_t ek[KYBER_PUBLICKEYBYTES],
+                       const uint8_t z[KYBER_SYMBYTES]);
+
 #endif /* KYBER_THRESHOLD_H */

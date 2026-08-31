@@ -64,12 +64,37 @@ See project discussion notes for the CPA-vs-CCA and "quantum-safe" framing.
         reconstruction and the AES-256-GCM round trip it gates, across 5
         real shareholder containers over HTTP; below-threshold subset
         correctly refuses to run
-- [ ] Phase 5 (stretch/research): CCA-secure threshold decapsulation
-  - [ ] Write up precisely why naively extending Phase 3 to the full
-        FO-transform Decaps breaks IND-CCA2 (re-encryption check needs
-        full plaintext)
-  - [ ] Survey/prototype candidate mitigations (noise flooding, distributed
-        re-encryption check, etc.) — this is the paper's actual novelty claim
+- [x] Phase 5a: full CCA-secure ML-KEM-768 KEM (`src/kyber/kem.c`)
+  - [x] `kyber_keypair_derand`/`kyber_encaps_derand`/`kyber_decaps`: the
+        Fujisaki-Okamoto transform over the IND-CPA PKE (G/H hashing,
+        re-encryption check, implicit rejection via J(z,ct))
+  - [x] Validated byte-exact against pq-crystals/kyber's crypto_kem_*
+        functions -- ek, dk, ct, encapsulated secret, decapsulated
+        secret, AND the implicit-rejection value for a corrupted
+        ciphertext all match exactly
+- [x] Phase 5b: `threshold_decaps` under an explicit trusted-combiner assumption
+  - Scoped deliberately narrower than full threshold-CCA: the naive
+    extension needs m' (the PKE-decrypted message) in the clear to
+    complete the FO re-encryption check, which isn't linear in the
+    secret key the way PKE decryption is -- see `src/kyber/README.md`
+    "Phase 5" for the full writeup of why, and why the general fix
+    (secret-share m', MPC circuit for hash+re-encrypt+compare) is its
+    own separate research effort, not something attempted here
+  - [x] `threshold_decaps`: combiner Lagrange-combines shares to get m'
+        (same as Phase 3), then finishes Decaps locally via the shared
+        `kyber_decaps_from_m` tail also used by the plain KEM path
+  - [x] Validated: matches plain `kyber_decaps` byte-for-byte on both
+        the accept path and the implicit-rejection path for a
+        corrupted ciphertext (no public reference for threshold Kyber
+        exists, so this is internal-consistency validation, same
+        approach as Phase 3)
+- [ ] Phase 5c (not attempted, future work): full threshold-CCA via
+      generic MPC over the FO check, or a threshold-friendly KEM
+      redesign that avoids it structurally. Multi-month-scale systems
+      research on its own -- see README for the survey of approaches
+- [ ] Wire kem.c/threshold_decaps into the Docker demo (currently still
+      uses the IND-CPA-only path from Phase 4) -- straightforward next
+      step if wanted, not yet done
 
 ## Notes for future sessions
 

@@ -1,13 +1,15 @@
-# ML-KEM-768 (phase 1: primitives, phase 2: IND-CPA PKE, phase 3: threshold decryption)
+# ML-KEM-768 (phases 1-3: primitives / IND-CPA PKE / threshold decryption, phase 5: full CCA-secure threshold Decaps)
 
 Module-LWE math and IND-CPA-secure PKE for ML-KEM-768 (Kyber, k=3): NTT,
 modular reduction, centered binomial noise sampling, polynomial
 compression/serialization, and full KeyGen/Enc/Dec. Written from FIPS 203
 / the Kyber round-3 spec, not copied from any reference implementation.
 
-Scope so far: **IND-CPA PKE, not the CCA-secure KEM**. No
-Fujisaki-Okamoto layer yet -- see the project's design notes on why that
-part is the hard, open-ended piece (and the actual paper-novelty target).
+Scope: real IND-CPA PKE (phases 1-3) plus a full CCA-secure KEM (`kem.c`,
+phase 5) with a threshold-decapsulation path (`threshold_decaps`) that
+works under an explicit, narrower trust assumption than full generic-MPC
+threshold cryptography -- see "Phase 5" below for exactly what that means
+and why it's the honest scope rather than the full research problem.
 
 ## Files
 
@@ -35,7 +37,14 @@ part is the hard, open-ended piece (and the actual paper-novelty target).
   a partial decryption locally, and Lagrange-combines k partials back
   into the correct plaintext -- without any party, including the
   coordinator, ever holding the secret key. See "The threshold trick"
-  below for why this works
+  below for why this works. Also has `threshold_decaps`, which extends
+  this to the full CCA-secure KEM below under a narrower, explicit
+  trust assumption -- see "Phase 5" below
+- `kem.c/h` -- the full CCA-secure ML-KEM-768 KEM: wraps the IND-CPA
+  PKE in the Fujisaki-Okamoto-style transform (hash the decrypted
+  message, re-encrypt, compare to the real ciphertext, fall back to a
+  pseudorandom value on mismatch) that makes it resistant to
+  chosen-ciphertext attacks, which the plain PKE alone is not
 
 ## Validation
 
@@ -44,17 +53,26 @@ part is the hard, open-ended piece (and the actual paper-novelty target).
 
 Those pinned values came from a byte-for-byte diff against the
 public-domain pq-crystals/kyber reference implementation, run once during
-development: `test/dump_ours.c` / `test/dump_indcpa_ours.c` (kept here)
-and matching `dump_ref.c` / `dump_indcpa_ref.c` (not committed -- live in
-a throwaway clone of pq-crystals/kyber) feed identical inputs to both
-implementations and their stdout was `diff`'d. Every function matched
-exactly: zetas table, `ntt`/`invntt`/`basemul`, Montgomery/Barrett
-reduction edge cases, CBD sampling, compress/decompress, serialization,
-message encode/decode, SHAKE256-PRF noise sampling, and full
-KeyGen/Enc/Dec (public key, secret key, ciphertext, and recovered
-message, all bit-exact for a fixed seed). To redo that full comparison,
-clone `https://github.com/pq-crystals/kyber` and re-run the `dump_ours`
+development: `test/dump_ours.c` / `test/dump_indcpa_ours.c` /
+`test/dump_kem_ours.c` (kept here) and matching `dump_ref.c` files (not
+committed -- live in a throwaway clone of pq-crystals/kyber) feed
+identical inputs to both implementations and their stdout was `diff`'d.
+Every function matched exactly: zetas table, `ntt`/`invntt`/`basemul`,
+Montgomery/Barrett reduction edge cases, CBD sampling,
+compress/decompress, serialization, message encode/decode, SHAKE256-PRF
+noise sampling, full KeyGen/Enc/Dec, and the full KEM (public key,
+secret key, ciphertext, encapsulated secret, decapsulated secret, *and*
+the implicit-rejection value for a corrupted ciphertext -- all bit-exact
+for a fixed seed). To redo that full comparison, clone
+`https://github.com/pq-crystals/kyber` and re-run the `dump_ours`
 programs against matching `dump_ref` programs built the same way.
+
+`threshold.c`'s functions have no public reference to diff against (no
+open threshold-Kyber implementation exists) -- those are validated by
+internal consistency instead: `test_threshold.c` checks any k-of-n
+subset recovers the message and a below-threshold subset doesn't;
+`test_kem.c` checks `threshold_decaps` agrees with plain `kyber_decaps`
+byte-for-byte, on both the accept and implicit-rejection paths.
 
 ## The threshold trick
 
@@ -72,6 +90,52 @@ original toy-LWE prototype did (`main.c`'s `shamir_split`/
 `lagrange_interpolate_zero` over the scalar dot product `s.u` mod 97) --
 `threshold.c` is the same idea applied to real Kyber's NTT-domain module
 math, over 768 coefficients instead of 4, mod 3329 instead of 97.
+
+## Phase 5: full CCA-secure threshold Decaps, and its trust assumption
+
+Real ML-KEM's `Decaps` isn't just PKE decryption -- it wraps it in a
+Fujisaki-Okamoto-style transform for CCA2 security:
+
+1. `m' = PKE.Decrypt(dk, c)` -- exactly what `threshold_finish_decrypt`
+   already computes, without any party seeing `dk`.
+2. `(K', r') = G(m' || H(ek))` -- hash `m'` to derive the real shared
+   secret and the randomness used to re-derive the ciphertext.
+3. `c' = PKE.Encrypt(ek, m', r')` -- re-encrypt.
+4. If `c' == c`, return `K'`; otherwise return a pseudorandom value
+   derived from a secret `z`, indistinguishable from a real key to
+   anyone without `z`. This is what defeats chosen-ciphertext attacks --
+   an attacker submitting a malformed ciphertext gets a useless,
+   consistent-looking response instead of a distinguishing signal.
+
+Steps 2-4 aren't linear in the secret key, so the Shamir-sharing trick
+that makes step 1 threshold-friendly doesn't extend to them -- they need
+`m'` in the clear, and `m'` is what determines the actual KEM output
+`K'`. `threshold_decaps` (`threshold.c`) does steps 2-4 in the combiner,
+after Lagrange-combining shares to get `m'` -- meaning **the combiner
+sees `m'`**, even though it never sees the private key. That's a real,
+narrower trust assumption than "no party ever reconstructs anything
+secret" -- it's "no party reconstructs the private key, but the combiner
+must be trusted not to leak the one message it briefly holds per
+decapsulation."
+
+This is a known-hard problem, not a shortcut taken for convenience: it's
+exactly why NIST's Multi-Party Threshold Cryptography project lists
+ML-KEM as an open target, and the general fix (secret-share `m'` itself,
+run the hash and re-encryption as a generic MPC circuit, do a secure
+equality test on `c'` vs `c` without ever reconstructing either in the
+clear) is a different, much larger undertaking than anything else in
+this repo -- closer to its own research project than an extension of
+this one. `z` itself isn't newly exposed by any of this: whoever runs
+ordinary (non-threshold) `Decaps` already needs `z` for the same
+implicit-rejection step, so the combiner holding it is no different from
+what a single-party decryptor already does.
+
+`kyber_decaps_from_m` exists specifically so this shared tail (hash,
+re-encrypt, compare, select) is written once and used by both
+`kyber_decaps` (the ordinary path, computing `m'` via `indcpa_dec`) and
+`threshold_decaps` (computing `m'` via Lagrange combination) -- given the
+invntt bug two sections down, duplicating this logic by hand a second
+time was not a risk worth taking again.
 
 ## A real bug this caught
 

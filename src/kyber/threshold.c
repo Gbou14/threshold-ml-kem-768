@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "kem.h"
+
 static int32_t
 mod_q(int32_t a)
 {
@@ -152,4 +154,40 @@ threshold_finish_decrypt(uint8_t msg_out[KYBER_MSGBYTES], const poly *partials, 
     poly_sub(&diff, v, &mp);
     poly_reduce(&diff);
     poly_tomsg(msg_out, &diff);
+}
+
+void
+threshold_decaps(uint8_t ss[KYBER_SSBYTES],
+                  const poly *partials,
+                  const int *xs,
+                  int k,
+                  const uint8_t ct[KYBER_CIPHERTEXTBYTES],
+                  const uint8_t ek[KYBER_PUBLICKEYBYTES],
+                  const uint8_t z[KYBER_SYMBYTES])
+{
+    /* Same PKE-decrypt-equivalent step as threshold_finish_decrypt --
+     * this is the linear part every shareholder already contributed
+     * to without seeing the secret key. What's different from here is
+     * that we don't stop at the raw message: we hand it to the same
+     * FO-completion logic ordinary (non-threshold) Decaps uses, which
+     * is where the combiner's stronger trust requirement comes from
+     * (see the doc comment on this function in threshold.h). */
+    poly mp;
+    threshold_combine(&mp, partials, xs, k);
+    poly_invntt_tomont(&mp);
+
+    /* v isn't threshold-shared -- it's the ciphertext's public scalar
+     * part, decompressed the same way any party (including a bare
+     * shareholder) could. */
+    poly v;
+    poly_decompress(&v, ct + KYBER_POLYVECCOMPRESSEDBYTES);
+
+    poly diff;
+    poly_sub(&diff, &v, &mp);
+    poly_reduce(&diff);
+
+    uint8_t m[KYBER_MSGBYTES];
+    poly_tomsg(m, &diff);
+
+    kyber_decaps_from_m(ss, m, ct, ek, z);
 }
