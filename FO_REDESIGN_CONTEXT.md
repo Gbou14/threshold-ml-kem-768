@@ -114,38 +114,124 @@ threshold-friendly (e.g., via generic MPC -- secret-share `m'`, run
 hash+re-encrypt+compare as an MPC circuit, which is a large systems
 undertaking on its own, see TODO.md phase 5c), **look for or design a
 CCA-secure lattice KEM construction that doesn't need a re-encryption
-check structured this way in the first place** -- i.e., one where the
-threshold-friendly property (CCA security achieved via something linear/
-shareable, or via a check that doesn't require reconstructing the
-message) is designed in from the start, not patched on after.
+check structured this way in the first place**.
 
-This is a genuinely open research question. What was discussed before
-this handoff (from the assistant's general knowledge, explicitly
-flagged as needing verification via real literature search, not treated
-as settled fact):
+## Literature search results (2026-08-31) -- this is a real, active research area
 
-- NIST's Multi-Party Threshold Cryptography project lists ML-KEM as an
-  open target specifically because of this class of problem -- check
-  NIST's MPTC project page/workshop materials for current state.
-- General classes of prior approaches in the threshold-crypto literature
-  (from general knowledge, not verified specific citations -- verify
-  before citing in any writeup):
-  - Generic MPC wrapping of the FO check (the "patch it" approach, not
-    what this redesign is trying to do)
-  - Structural redesigns of the CCA transform itself to be
-    threshold/MPC-friendly (this is the direction of interest)
-  - Weaker/relaxed trust models (what's currently implemented)
-- Search terms for literature review: "threshold Kyber", "threshold
-  ML-KEM", "threshold-friendly KEM", "distributed decapsulation",
-  "threshold lattice-based encryption CCA", IACR eprint archive, recent
-  (2023-2026) NIST MPTC workshop proceedings.
+A real literature search (IACR eprint + web search) confirms this is
+not a niche question -- there is recent, peer-reviewed work doing
+*exactly* this, plus active NIST standardization interest. Summary,
+most important result first:
 
-**Explicit caveat for whoever picks this up:** the assistant in the
-prior session was not fully confident in specific paper citations for
-this area and recommended the user's research partner do a real
-literature search rather than relying on the assistant's recall. Do not
-assume any specific named scheme exists without checking IACR eprint or
-similar directly.
+**The key paper:** Oleksandra Lapiha and Thomas Prest, "A Lattice-Based
+IND-CCA Threshold KEM from the BCHK+ Transform," **Asiacrypt 2025**,
+[eprint 2025/1958](https://eprint.iacr.org/2025/1958.pdf). Peer-reviewed
+at a top-tier venue, not an obscure preprint.
+
+**Follow-up (18x smaller ciphertexts):** Katharina Boudgoust, Rafaël
+del Pino, Oleksandra Lapiha, Thomas Prest, "IND-CCA Lattice Threshold
+KEM under 30 KiB," [eprint 2026/021](https://eprint.iacr.org/2026/021.pdf).
+
+**The core idea (BCHK+ transform) -- this is precisely the "avoid FO"
+answer:** Don't use FO for CCA security at all. Use the
+**Boneh-Canetti-Halevi-Katz (BCHK) transform** instead (Boneh, Canetti,
+Halevi, Katz, EUROCRYPT 2004) -- a *different*, older generic
+CPA-to-CCA compiler that builds a CCA PKE from (a threshold) IBE + a
+one-time signature, where the ciphertext validity check is on **public
+values**, so it doesn't need thresholdizing at all. Boneh-Boyen-Halevi
+had already shown this works for threshold PKE in the classical
+(non-lattice) setting.
+
+The catch for lattices: BCHK alone doesn't guarantee "decapsulation
+consistency" (the same ciphertext decrypting to two different messages
+under two different decrypter subsets) because lattice ciphertexts are
+inherently noisy. Lapiha-Prest's fix is to *also* run FO, but only to
+patch that consistency property -- **not for CCA security, which BCHK
+already provides**. Quoting the paper directly: "the input to FO
+re-encryption is no longer sensitive and does not need to be
+thresholdised." That's the whole trick: FO's re-encryption check still
+happens, but on non-sensitive input, because BCHK is doing the actual
+security work.
+
+**Important reframing this causes:** the field's realized answer to
+"avoid FO" is not a patched/modified ML-KEM -- it's a **different
+lattice construction from scratch**, built from a threshold
+identity-based encryption scheme (starting from Agrawal-Boneh-Boyen,
+later simplified via "ROHIBE") combined with threshold-friendly
+signature building blocks (Plover, Esgin et al. EUROCRYPT 2024;
+Threshold Raccoon, Katsumata et al. CRYPTO 2024) and a new hardness
+assumption ("Coset-Hint-MLWE," a generalization of Hint-MLWE, Kim et
+al. CRYPTO 2023, proven hard under standard assumptions). If the user
+wants to "redesign to avoid FO," reproducing/extending/implementing
+BCHK+ is the concrete, current state of the art to build on or against
+-- not a modification of the Kyber/ML-KEM code already in this repo.
+
+**Honest limitations of BCHK+ itself** (from the papers' own framing,
+useful for finding a genuine gap to contribute in):
+- Selective security, not the stronger adaptive/UC notion some
+  competing (heavier) constructions achieve.
+- Has a trusted setup.
+- The base (Asiacrypt'25) version is not robust (no defense against a
+  misbehaving shareholder); the 2026 follow-up adds robustness via
+  Vandermonde secret sharing instead of Shamir, but only at a reduced
+  query bound (Q=2^25 vs 2^45).
+- Ciphertexts, even after the 18x improvement, are ~30 KiB for T=32 --
+  compare to plain (non-threshold) ML-KEM-768's ~1KB ciphertext. Real
+  efficiency gap remains vs. non-threshold KEMs.
+- Not built on Kyber's module-LWE structure specifically -- an open
+  question is whether these ideas can be adapted to Kyber's exact
+  parameter regime rather than a fresh ABB/ROHIBE-style IBE.
+
+**The cautionary-tale comparison (why generic MPC over FO is bad, now
+with a concrete number):** Cong et al., "Gladius: LWR Based Efficient
+Hybrid Public Key Encryption with Distributed Decryption" (eprint
+2021/096, LWR/Saber-based, not Kyber). Small ciphertexts (512 bytes!)
+but requires generic MPC to evaluate the FO hash function: **136,491
+rounds for 3 parties**, and the security argument is only heuristic
+(can't represent a random oracle as a circuit for the MPC evaluation).
+This is the concrete version of "the FO-in-MPC approach is a much
+bigger, less practical undertaking" -- worth citing directly if the
+paper discusses why BCHK+-style avoidance is preferable to patching.
+
+**Other related work found** (for a fuller related-work section later):
+Boneh et al.'s "universal thresholdiser" (ThFHE-based, thresholdizes
+*any* functionality including FO) -- theoretical, no parameter set
+proposed, slow runtime flagged by the authors themselves as an open
+problem. Devevey et al. -- adaptive security + robustness via lossy
+encryption + correlation-intractable-hash NIZKs, heavy machinery, no
+parameters proposed either. Two IND-CPA-only (not CCA) lattice TPKE
+papers based on noise-flooded Lindner-Peikert/Regev variants.
+
+**NIST context, now verified (was previously an unconfirmed claim):**
+NIST's Multi-Party Threshold Cryptography project (IR 8214C, "the NIST
+Threshold Call") explicitly includes ML-KEM in scope. MPTS 2026 (NIST
+Workshop on Multi-Party Threshold Schemes, Jan 26-29 2026) covered
+threshold PKE/KEM as a named topic alongside threshold signatures, FHE,
+and ZKPs. See
+[csrc.nist.gov/Projects/threshold-cryptography](https://csrc.nist.gov/Projects/threshold-cryptography/tcall-1).
+
+**Search terms that worked, for continuing the search further:**
+"threshold Kyber ML-KEM decapsulation Fujisaki-Okamoto", "threshold-friendly
+CCA-secure lattice KEM without re-encryption check", "NIST call for
+multi-party threshold cryptography ML-KEM 2026", "Gladius threshold KEM
+Cong lattice MPC". IACR eprint search directly (eprint.iacr.org) is more
+reliable than general web search for finding the underlying papers.
+
+**Suggested next step for the user:** given BCHK+ is real, recent,
+peer-reviewed, and directly on-target, the practical next decision is
+*not* "design a threshold-friendly KEM from nothing" -- it's choosing
+among: (a) implement/reproduce BCHK+ (or the 2026 follow-up) as a
+systems contribution, applying the same rigorous
+validate-against-everything methodology used in this repo's phases 1-5;
+(b) find a genuine open gap in it to improve (robustness without the
+query-bound tradeoff, adapting it to Kyber's specific module structure,
+further ciphertext-size reduction); or (c) use it as a benchmark/point
+of comparison for the trusted-combiner `threshold_decaps` already built
+here, and write up the tradeoff explicitly (this repo's approach: much
+smaller ciphertexts, reuses standard ML-KEM, but weaker trust model;
+BCHK+: full threshold-CCA with no trusted combiner, but a different
+non-Kyber construction and ~30x-ish larger ciphertexts). This decision
+needs the user's input -- don't pick for them.
 
 ## Working style notes for continuing this project
 
