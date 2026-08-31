@@ -1,4 +1,4 @@
-# TIBE / BCHK+ threshold KEM (Phase 1: ring arithmetic + Gaussian sampling)
+# TIBE / BCHK+ threshold KEM (Phase 1-2: ring arithmetic, Gaussian sampling, WOTS+)
 
 This module is the from-scratch implementation of Lapiha & Prest, "A
 Lattice-Based IND-CCA Threshold KEM from the BCHK+ Transform" (Asiacrypt
@@ -10,12 +10,14 @@ existing threshold-ML-KEM-768 code is untouched (`git diff master --
 src/kyber/` is empty), so it stays available as the working fallback and
 comparison point if this redesign doesn't pan out.
 
-**Status: Phase 1 only.** This is ring arithmetic and Gaussian sampling
--- the foundation every later phase (WOTS+, the TIBE algebra, the 3-round
-threshold-decryption protocol, the BCHK+ TKEM layer, Docker wiring) is
-built on. See `../../BCHK_TODO.md` for the full roadmap and what's not
-here yet. Nothing in this module does threshold decryption, encryption,
-or signing yet.
+**Status: Phase 1-2.** Ring arithmetic, Gaussian sampling, and the
+WOTS+ one-time signature -- the foundation every later phase (the TIBE
+algebra, the 3-round threshold-decryption protocol, the BCHK+ TKEM
+layer, Docker wiring) is built on. See `../../BCHK_TODO.md` for the
+full roadmap and what's not here yet. **Nothing in this module does
+threshold encryption or decryption yet** -- WOTS+ signs/verifies, but
+the BCHK+ transform that binds a signature to a threshold-IBE
+ciphertext (Sec 3.4 of the spec) is Phase 3+.
 
 ## Files
 
@@ -34,7 +36,9 @@ or signing yet.
 - `gauss.c`/`.h` -- discrete-Gaussian-*approximating* sampling at an
   arbitrary width. See "Gaussian sampling" below for the approximation
   this makes and why.
-- `test/test_ring.c`, `test/test_gauss.c` -- the regression suites (see
+- `wots.c`/`.h` -- WOTS+, the one-time signature the BCHK+ transform
+  binds to each fresh TIBE ciphertext. See "WOTS+" below.
+- `test/test_ring.c`, `test/test_gauss.c`, `test/test_wots.c` -- the regression suites (see
   "Validation" below).
 
 ## Parameter choices
@@ -118,6 +122,39 @@ correctly), not good enough to make a security claim about the resulting
 system without replacing it. Flagged here, in `BCHK_PAPER_SPEC.md` open
 question #2, and in `BCHK_TODO.md` so it isn't forgotten.
 
+## WOTS+
+
+The paper pins the one-time signature concretely (Theorem 6, Appendix
+A): WOTS+ (Hulsing, Africacrypt 2013), `n=256` bits, Winternitz
+parameter `w=16`, all four internal hash functions (the chain function
+`f`, the seed-expanding `PRF`, and the message/key-compressing
+`H_msg`/`H_key`) instantiated as SHA2-256 with a distinct one-byte
+domain-separation prefix each (`toByte(0..3, 32)` -- 31 zero bytes then
+the constant). Unlike the Gaussian sampler, there's no approximation
+here: this is implemented exactly as specified, and the derived
+parameters (`l1=64` message digits, `l2=3` checksum digits, `l=67`
+chains, 2144-byte signatures) match the paper's stated figure exactly,
+which is itself a small internal-consistency check that the
+construction was transcribed and implemented correctly.
+
+**One concrete choice the paper leaves open**: `PRF_seed(y)`'s `y`
+argument (used to derive the `w-1=15` shared (key, bitmask) pairs from
+the public `seed`) isn't given a specified byte-width. This
+implementation encodes `y` as a 4-byte big-endian integer -- a
+reasonable, standard-adjacent choice (documented in `wots.c`), but,
+like the identity-embedding encoding flagged in `BCHK_PAPER_SPEC.md`
+open question #4, a place a from-scratch reader could reasonably make a
+different concrete choice and still match the paper's abstract
+description.
+
+This is a genuine one-time signature: reusing the same `(sk, vk)` pair
+to sign two different messages leaks enough intermediate chain values
+to forge a signature on a third message (the classical WOTS+ weakness).
+Nothing in this module enforces "sign once" -- that's the caller's
+responsibility, and it's exactly what the BCHK+ construction relies on:
+a fresh `(sk, vk)` pair is generated per `Encaps` call (Sec 3.4 /
+4.6), never reused.
+
 ## Validation
 
 No public reference implementation of this scheme exists anywhere (this
@@ -126,7 +163,7 @@ situation this project was already in for `src/kyber/threshold.c` and
 `threshold_decaps`, handled the same way: internal consistency instead
 of a byte-exact diff.
 
-`make test` builds and runs two self-contained suites:
+`make test` builds and runs three self-contained suites:
 
 - `test_ring`: ring-axiom checks (additive inverse, scalar-mul identity
   and zero, serialize/deserialize round trip), an explicit
@@ -145,8 +182,13 @@ of a byte-exact diff.
   tolerances chosen so the check has a wide margin against a passing
   distribution's own sampling noise (see the file for the exact
   numbers) while still catching a genuinely broken sampler.
+- `test_wots`: sign-then-verify round trips (including an empty
+  message), and that Verify reliably rejects a tampered message, a
+  tampered signature byte, and a valid signature checked against the
+  wrong `vk` -- plus a sanity check that two `wots_keygen` calls
+  produce different keys.
 
-Both currently pass. Representative output:
+All three currently pass. Representative output:
 
 ```
 ./test/test_ring
@@ -157,4 +199,6 @@ test_ring: all tests passed
   sigma=4: n=20000 empirical mean=0.04825 empirical stddev=4.019
   sigma=1.41e+14: n=20000 empirical mean=7.94e+11 empirical stddev=1.418e+14
 test_gauss: all tests passed
+./test/test_wots
+test_wots: all tests passed
 ```

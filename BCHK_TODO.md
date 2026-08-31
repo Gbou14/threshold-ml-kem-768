@@ -34,8 +34,18 @@ ML-KEM.
         safe-for-correctness-but-not-re-derived-for-security with the
         project owner, see `src/tibe/README.md` "Parameter choices")
   - [x] `make test` passes (`test_ring`, `test_gauss`)
-- [ ] Phase 2: WOTS+ one-time signature (`BCHK_PAPER_SPEC.md` Sec 3.3 --
-      SHA2-256-based, n=256, w=16)
+- [x] Phase 2: WOTS+ one-time signature (`src/tibe/wots.c`)
+  - [x] SHA2-256-based `f`/`PRF`/`H_msg`/`H_key` with the paper's
+        `toByte(0..3,32)` domain separation (`BCHK_PAPER_SPEC.md` Sec
+        3.3, Theorem 6); n=256, w=16, l1=64, l2=3, l=67, 2144-byte
+        signatures -- matches the paper's stated figure exactly
+  - [x] `PRF_seed`'s index argument encoded as 4 big-endian bytes -- a
+        concrete choice the paper leaves open, documented in
+        `src/tibe/wots.c` and `src/tibe/README.md` "WOTS+"
+  - [x] `make test` passes (`test_ring`, `test_gauss`, `test_wots`) --
+        sign/verify round trips, tampered-message/signature/wrong-vk
+        rejection, no public reference to diff against (none exists for
+        this exact instantiation)
 - [ ] Phase 3: TIBE core algebra, non-threshold (`Setup` with the full
       secret in one place, `Encrypt`, a direct non-threshold `Decrypt`)
       to validate the base algebra (`F_vk`, `Decomp_beta`, the
