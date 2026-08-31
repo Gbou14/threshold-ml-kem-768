@@ -19,6 +19,67 @@ threshold encryption or decryption yet** -- WOTS+ signs/verifies, but
 the BCHK+ transform that binds a signature to a threshold-IBE
 ciphertext (Sec 3.4 of the spec) is Phase 3+.
 
+## The actual trust-model delta vs. `src/kyber/threshold_decaps`
+
+This is the single most important thing to get right about *why* this
+redesign exists, worth stating precisely rather than loosely (it's
+going into a paper -- see `BCHK_TODO.md` "Future: paper writeups" --
+so imprecise claims here would propagate).
+
+**What does NOT change**: in both schemes, the combiner (coordinator)
+ends up computing the final message and shared secret in the clear --
+that's unavoidable, it's the combiner's whole job. It is **not true**
+that "the combiner never holds the decrypted message" in the new
+scheme; it does, exactly as it did before. Anyone tempted to write that
+sentence in a paper draft should replace it with the precise claim
+below.
+
+**What DOES change: who has to be trusted for CCA security to hold at
+all.**
+
+- **Old (`src/kyber/threshold_decaps`)**: the ciphertext-validity check
+  (the Fujisaki-Okamoto re-encryption comparison, `c' == c?`) can only
+  run *after* `m'` has already been reconstructed -- and `m'` can only
+  be reconstructed by Lagrange-combining every shareholder's partial
+  decryption. So the sequence is: shareholders blindly compute and
+  reveal partial decryptions of *whatever ciphertext they're handed*,
+  with no way to locally tell a legitimate ciphertext from an
+  attacker-crafted one; only then, at the very end, does the combiner
+  check validity. If the combiner is compromised or simply skips that
+  check, CCA security is gone -- a malicious combiner (or an attacker
+  who controls it) can feed shareholders crafted ciphertexts and use
+  their honestly-computed partial decryptions as a decryption oracle,
+  which is exactly what CCA-security is supposed to prevent. This is
+  the "narrower trust assumption" `src/kyber/README.md` Phase 5 and
+  `FO_REDESIGN_CONTEXT.md` describe: CCA security itself, not just
+  confidentiality of one message, rests on the combiner behaving
+  honestly.
+- **New (BCHK+, this module)**: every shareholder independently runs
+  `assert SIG.Verify(vk, ct, sig) = 1` (`BCHK_PAPER_SPEC.md` Sec 4.6,
+  `TKEM.ShareDecaps_j`) **before** doing any partial-decryption work at
+  all, in every round -- and this check needs no secret material, so
+  every shareholder can (and must) do it independently, without
+  trusting the combiner or anyone else to have done it correctly. A
+  ciphertext without a valid one-time signature under a properly-formed
+  `vk` is rejected by every honest shareholder before it ever produces
+  a single partial-decryption value, full stop. **CCA security no
+  longer depends on the combiner's honesty at all** -- a fully
+  malicious combiner can still refuse to combine, or output garbage,
+  but it cannot use the protocol to mount a chosen-ciphertext attack,
+  because the shareholders it would need to fool into leaking partial
+  decryptions of a malformed ciphertext will already have rejected it
+  on their own. The combiner still reconstructs the real message for
+  *legitimate* ciphertexts (that's correctness, not a security hole) --
+  the delta is that this reconstruction is no longer the point where
+  the system's CCA security lives or dies.
+
+One remaining, unrelated trust assumption stays the same in both
+schemes and is **not** addressed by this redesign: the dealer
+(`TIBE.Setup`/`TKEM.Keygen`) is trusted to generate the master secret
+honestly and distribute shares correctly (`BCHK_PAPER_SPEC.md` Sec 5,
+"Remark 1") -- matching this repo's existing `src/dealer.c` role
+exactly. No distributed key generation exists in either scheme.
+
 ## Files
 
 - `params.h` -- concrete numeric constants from the paper's Table 2:

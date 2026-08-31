@@ -76,6 +76,39 @@ ML-KEM.
     read yet) or distributed key generation (no DKG in the base paper
     either) -- real research extensions, not attempted here
 
+## Future: paper writeups (goal, not yet started)
+
+Two papers, once the implementation is far enough along to have real
+results to report -- confirmed with the project owner as the end goal
+this whole redesign is in service of:
+
+1. **Implementation paper**: reproducing Lapiha & Prest's BCHK+
+   threshold KEM (eprint 2025/1958) as a from-scratch, real, working
+   system -- the engineering contribution, in the same spirit as this
+   project's own `src/kyber/README.md` (what was built, how it was
+   validated with no public reference to check against, what
+   concrete choices the paper left open and how they were resolved --
+   `BCHK_PAPER_SPEC.md`'s open-questions section and each phase's
+   README notes are the running material for this).
+2. **Comparison paper**: this implementation vs. `src/kyber/threshold_decaps`
+   (the trusted-combiner threshold ML-KEM already built and validated in
+   this repo) -- results-based, once both systems can be measured
+   side by side (correctness rates, timing/ciphertext-size overhead,
+   and the precise trust-model delta written up rigorously; see this
+   file's `src/tibe/README.md` companion, "The actual trust-model delta
+   vs. `src/kyber/threshold_decaps`", for the precise claim to build on:
+   **not** "the new combiner never sees the plaintext" (false in both
+   schemes -- the combiner necessarily reconstructs it in both), but
+   "CCA security no longer depends on the combiner's honesty," because
+   every shareholder independently rejects an invalid ciphertext via a
+   public signature check before doing any partial-decryption work,
+   rather than the validity check happening only after the fact at the
+   combiner.
+
+Not started -- flagged here so it isn't lost, and so any writeup starts
+from the precise trust-model claim above rather than the looser
+"combiner never holds the key" phrasing that doesn't survive scrutiny.
+
 ## Notes for future sessions
 
 - Branch: `bchk-redesign`. `master` is untouched and is the fallback if
