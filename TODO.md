@@ -25,13 +25,22 @@ See project discussion notes for the CPA-vs-CCA and "quantum-safe" framing.
   - Caught and fixed a real bug here: `kyber_ntt_init()` was never wired
     into the library code path, only into test harnesses -- see
     `src/kyber/README.md` "A real bug this caught"
-- [ ] Phase 3: Extend Shamir/Lagrange to polynomial-vector coefficients
-  - [ ] Generalize `shamir.c`/`lagrange.c` from scalars (mod 97) to
-        component-wise sharing of s over Z_q (q=3329), vectors of degree-256 polys
-  - [ ] Threshold decrypt: each shareholder computes a partial decryption
-        (share_i^T · u), coordinator Lagrange-combines, recovers message
-        without reconstructing s
-  - [ ] Validate: N-of-M reconstruction correct, below-threshold fails/garbles
+- [x] Phase 3: Threshold decryption (`src/kyber/threshold.c`)
+  - [x] Shamir-share skpv's 768 (K=3 x N=256) NTT-domain coefficients over
+        Z_3329, via OpenSSL RAND_bytes (not toy prototype's rand())
+  - [x] threshold_partial_decrypt (per-shareholder) + threshold_combine +
+        threshold_finish_decrypt (coordinator) recover the message without
+        any party reconstructing skpv
+  - [x] Validate: any k-of-5 subset (5 different subsets tried) recovers
+        the message; 2-of-5 (below THRESHOLD=3) does not; ordinary
+        indcpa_dec still works on the un-split key. 10x repeat run with
+        fresh random shares each time, no flakiness
+  - Caught two real bugs here (see `src/kyber/README.md`): (1) a missing
+    `poly_invntt_tomont(&mp)` step hand-copying indcpa_dec's tail, not
+    caught by comparing intermediate values since both a manual "ground
+    truth" check and the threshold path independently omitted the same
+    step -- only caught by checking final message correctness end to end;
+    (2) fixed by consolidating the whole tail into `threshold_finish_decrypt`
 - [ ] Phase 4: Rebuild dealer/shareholder/coordinator Docker flow around real PKE
   - [ ] Replace `toy_crypto.c` calls with the new Kyber PKE + Shamir layer
   - [ ] Re-run the docker-compose experiment harness, regenerate results.csv

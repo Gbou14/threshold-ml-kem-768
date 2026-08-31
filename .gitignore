@@ -4,6 +4,7 @@ threshold
 *.out
 src/kyber/test/test_primitives
 src/kyber/test/test_indcpa
+src/kyber/test/test_threshold
 
 # Archived duplicate of shamir-docker/ (kept as backup, not tracked)
 shamir-docker.tar.gz
