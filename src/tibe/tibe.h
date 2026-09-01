@@ -57,7 +57,18 @@ typedef struct
  * privately needs it for Decomp_beta(d0^-1 * ...) in Decrypt/Combine
  * (Algorithm 7 line 5). Phase 5 replaces whole possession of this
  * struct with Shamir shares of s_a/e_a distributed across
- * shareholders -- see BCHK_TODO.md. */
+ * shareholders -- see BCHK_TODO.md.
+ *
+ * `a0` (Setup's other unpublished value alongside d0) is deliberately
+ * NOT retained here: Phase 5 briefly added it under the assumption
+ * that Algorithm 5's y_{i,0} needed raw a0 directly, but that reading
+ * turned out to be a transcription slip -- the correctness algebra
+ * (verified via a symbolic toy-ring check across the real multi-party
+ * protocol, not just Phase 3's single-party collapse) only closes
+ * when y_{i,0} = A0.p_i, a proper 3-vector dot product matching
+ * y_{i,1}/y_{i,2}'s own pattern, needing only the already-public A0
+ * (part of ek), not a0 itself. See src/tibe/README.md "Phase 5" and
+ * threshold.c's round0 for the corrected formula. */
 typedef struct
 {
     ring_elem s_a;

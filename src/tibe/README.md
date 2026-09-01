@@ -1,4 +1,4 @@
-# TIBE / BCHK+ threshold KEM (Phase 1-4: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding)
+# TIBE / BCHK+ threshold KEM (Phase 1-5: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding, the real threshold protocol)
 
 This module is the from-scratch implementation of Lapiha & Prest, "A
 Lattice-Based IND-CCA Threshold KEM from the BCHK+ Transform" (Asiacrypt
@@ -10,19 +10,20 @@ existing threshold-ML-KEM-768 code is untouched (`git diff master --
 src/kyber/` is empty), so it stays available as the working fallback and
 comparison point if this redesign doesn't pan out.
 
-**Status: Phase 1-4.** Ring arithmetic, Gaussian sampling, WOTS+, the
-core TIBE encryption/decryption algebra, and now the identity-embedding
-map `E` (`identity.c`) that turns a fresh WOTS+ verification key into
-the unit ring element `tibe_encrypt`/`tibe_decrypt_direct` expect as
-`id` -- so a real WOTS+ keypair can now be used end to end instead of
-Phase 3's placeholder random unit. Still **non-threshold**:
-`tibe_setup` produces the whole master secret in one place, and
-`tibe_decrypt_direct` is a single-party stand-in for the real 3-round
-`ShareExtract`/`Combine` protocol. See `../../BCHK_TODO.md` for the
-full roadmap. **Nothing in this module does actual threshold decryption
-yet, and Encaps/decaps at the TKEM/BCHK+ layer (binding a WOTS+
-signature to a ciphertext, running the FO consistency check) hasn't
-been wired up either** -- both are still ahead.
+**Status: Phase 1-5.** Ring arithmetic, Gaussian sampling, WOTS+, the
+core TIBE encryption/decryption algebra, the identity-embedding map
+`E`, and now the real 3-round threshold-decryption protocol
+(`threshold.c`) -- `(s_a, e_a)` are genuinely Shamir-shared across
+`TIBE_N` parties, and any `TIBE_T` of them jointly recover a message
+via `ShareExtract_{0,1,2}`/`Combine`, replacing `tibe_decrypt_direct`'s
+single-party stand-in with the real thing. Validated end to end with a
+real WOTS+-embedded identity, real pairwise masking, and a non-trivial
+active set -- see "The real 3-round threshold protocol" below,
+including two more transcription issues this phase's own testing
+caught. See `../../BCHK_TODO.md` for the full roadmap. **Encaps/decaps
+at the TKEM/BCHK+ layer (binding a WOTS+ signature to a ciphertext,
+running the FO consistency check) hasn't been wired up yet, and
+neither has the Docker demo** -- both are still ahead (Phases 6-7).
 
 ## The actual trust-model delta vs. `src/kyber/threshold_decaps`
 
@@ -118,9 +119,15 @@ exactly. No distributed key generation exists in either scheme.
 - `identity.c`/`.h` -- the identity-embedding map `E`, turning a fresh
   WOTS+ verification key into the unit ring element `tibe_encrypt`/
   `tibe_decrypt_direct` need as `id`. See "Identity embedding" below.
+- `threshold.c`/`.h` -- the real 3-round threshold-decryption protocol:
+  Shamir-sharing `(s_a, e_a)`, `threshold_round0`/`1`/`2` (Algorithms
+  5-7), and `threshold_combine` (Algorithm 8), replacing
+  `tibe_decrypt_direct`'s single-party stand-in with genuine
+  multi-party decryption. See "The real 3-round threshold protocol"
+  below.
 - `test/test_ring.c`, `test/test_gauss.c`, `test/test_wots.c`,
-  `test/test_tibe.c`, `test/test_identity.c` -- the regression suites
-  (see "Validation" below).
+  `test/test_tibe.c`, `test/test_identity.c`, `test/test_threshold.c`
+  -- the regression suites (see "Validation" below).
 
 ## Parameter choices
 
@@ -363,6 +370,100 @@ different multiplication rules is imposed on it, hence a unit by CRT)
 is recorded in `identity.h`'s header comment -- but the test doesn't
 trust the argument, it checks the actual inversion succeeds.
 
+## The real 3-round threshold protocol (`threshold.c`)
+
+This is the piece that turns everything built in Phases 1-4 into an
+actual *threshold* scheme: `(s_a, e_a)` are genuinely Shamir-shared
+across `TIBE_N` parties (coefficient-wise, same construction as
+`src/kyber/threshold.c`'s `threshold_split_secret`, generalized from
+`int32`/mod-3329 to BIGNUM/mod-`q`), and any `TIBE_T` of them jointly
+recover a message via the paper's `ShareExtract_{0,1,2}`/`Combine`
+protocol (Algorithms 5-8) -- replacing `tibe_decrypt_direct`'s
+single-party stand-in with the real thing. `threshold_setup` also
+distributes `d0` directly (not secret-shared -- see `tibe.h`'s
+`tibe_msk` comment for why every party needs it un-split) and a
+pairwise PRF seed per `{i,j}` pair (both parties get the same seed
+from the dealer and derive both directional sub-seeds themselves via
+domain-separated hashing), matching the paper's "distributed over a
+secure channel" trusted-dealer model (Remark 1) that this repo's
+`src/dealer.c` already implements for the Kyber side.
+
+**Two more issues this phase's own testing caught**, on top of Phase
+3's `z2` sign fix (re-confirmed here to still apply, unchanged, to the
+real multi-party case -- see below):
+
+- **`y_{i,0}`'s formula.** The paper's Algorithm 5 line 2 was initially
+  read as the scalar formula `y_{i,0} = a0*p_{i,0}+p_{i,1}`, using raw
+  (unpublished) `a0`. Building the real protocol against that reading
+  broke down in a way Phase 3's single-party test couldn't have caught:
+  a symbolic toy-ring check of the *full* multi-party construction
+  (real Shamir shares, real pairwise masking, `T` distinct active
+  parties) showed `F_vk*z==r` failing regardless of the `z2` sign,
+  even with masking and Lagrange reconstruction independently verified
+  correct in isolation. The fix, found by testing the structurally
+  obvious alternative: `y_{i,0} = A0.p_i`, a proper 3-vector dot
+  product against the *published* `A0` -- exactly mirroring
+  `y_{i,1} = (A1-E(vk)*G).x_{i,0}` and `y_{i,2} = A2.x_{i,1}`'s own
+  pattern. With that fix, the full toy-ring check (real masking, real
+  T-of-N reconstruction, non-trivial active sets) closes exactly. In
+  hindsight the original reading breaking the symmetry between the
+  three `y_i` lines should have been a signal on its own; the working
+  hypothesis is a PDF-extraction slip reading a compact dot-product
+  notation as a scalar formula. One consequence: no shareholder needs
+  raw `a0` at all -- an `a0` field was briefly added to `tibe_msk`/
+  `threshold_share` under the wrong reading and removed once the fix
+  landed; only `ek` (for `A0`/`A1`/`A2`/`G`) and `d0` (for
+  `Decomp_beta`) are needed beyond a party's own Shamir share.
+- **`z2`'s sign, re-verified for the real protocol.** Phase 3 found
+  `z2 = -c0` (not the literal `+c0`) for the single-party stand-in.
+  That derivation didn't touch the noise-flooding/masking machinery at
+  all, so it wasn't obvious in advance whether the same sign would
+  keep working once real blinding and masking were layered on top --
+  it does, confirmed by the same toy-ring check (with the `y_{i,0}`
+  fix above) and by this phase's own full C-level end-to-end test.
+
+**The full round-by-round shape**, matching Algorithms 5-8 directly:
+
+1. **Round 0** (`threshold_round0`): each active party samples fresh
+   blinding `(p_i, x_{i,0}, x_{i,1})` (9 ring elements, width
+   `TIBE_SIGMA_P = 2^47` -- the "flood and submerge" noise from
+   `gauss.c`), computes `w_i = A0.p_i + (A1-E(vk)*G).x_{i,0} + A2.x_{i,1}`,
+   and returns only a commitment `H_cmt(w_i)` -- `w_i` itself stays
+   private until round 1.
+2. **Round 1** (`threshold_round1`): trivial reveal of `w_i`.
+3. **Round 2** (`threshold_round2`): every party first checks every
+   *other* active party's revealed `w_j` against its round-0
+   commitment (Algorithm 7 line 1) -- returns failure immediately if
+   any doesn't match, catching a party that lied in round 0/1 before
+   any further computation. Then: derive the pairwise mask `m_i` (sum
+   of `H_mask(seed_{i->j}, ctnt)` minus `H_mask(seed_{j->i}, ctnt)`
+   over every other active `j`, where `ctnt` canonically serializes the
+   active set, ciphertext, and every collected `(cmt_j, w_j)` --
+   `build_ctnt`/`h_mask` in `threshold.c`), sum `w = sum(w_j)`, derive
+   `(c0,c1)` via `Decomp_beta(d0^-1*(r-w))` (needing `ring_inv` again,
+   locally, by every active party), and compute this party's
+   contribution `(z_i, x_{i,0}, x_{i,1})` using its own Shamir share
+   scaled by its Lagrange coefficient.
+4. **Combine** (`threshold_combine`): sums every contribution, adds
+   `c1` to `z0` and subtracts `c0` from `z2`, rebuilds `F_vk`, and runs
+   Algorithm 8 line 7's own correctness assertion (`F_vk*z==r`) before
+   decoding -- independently re-deriving `(c0,c1)` from the public
+   `w` rather than trusting any one party's already-computed value (a
+   deliberate, documented choice to keep the implementation obviously
+   correct at the cost of one extra `ring_inv`, not a security
+   requirement -- `c0`/`c1` are public-derivable by that point).
+
+**Why this is still the "no implicit trust in the combiner" property**
+(see "The actual trust-model delta" above, now with the real protocol
+behind it rather than a placeholder): nothing in this round structure
+gives the combiner (whoever runs `Combine`) anything a shareholder
+didn't already have to reveal to complete the protocol honestly, and
+the CCA-relevant validity check (Sec 3.4's `SIG.Verify`) still hasn't
+entered the picture at all -- that's the TKEM/BCHK+ layer, Phase 6,
+still ahead. What Phase 5 adds is that the *decryption* itself is now
+genuinely distributed, with cheating shareholders caught via
+commit-then-reveal rather than silently trusted.
+
 ## Performance
 
 A full `Setup` + `Encrypt` + `Decrypt` cycle at this module's real
@@ -376,9 +477,23 @@ counts are kept deliberately small (one full round trip, plus 2 more in
 a loop -- not a larger number) specifically because of this; this is
 the real cost of "correctness-first BIGNUM, no NTT" showing up beyond
 just a single `ring_mul`, and reinforces that NTT-based multiplication
-(`BCHK_TODO.md` phase 8) will matter a lot more once Phase 5-7 need many
-more ring operations per decapsulation than this phase's single
-non-threshold decrypt does.
+(`BCHK_TODO.md` phase 8) matters even more once the real protocol is
+involved -- confirmed below.
+
+**The real 3-round protocol is slower still, as expected.** A full
+`T=5`-of-`N=10` decapsulation (`test_threshold.c`'s
+`test_full_threshold_decapsulation`) took **~35 minutes** wall clock
+end to end (measured directly). Each active party's round 0 alone is
+~10 `ring_mul`-equivalents (building `A0.p_i` + `(A1-id*G).x_{i,0}` +
+`A2.x_{i,1}`, ~100s), times 5 parties; round 2 adds one more `ring_inv`
+per party (~35-40s each) plus a handful more multiplies; `Combine`
+rebuilds `F_vk` and does the 18-multiply dot-product/assert/decode
+sequence, plus its own independent `ring_inv`. `test_threshold.c` runs
+this exactly once (not repeated) for the same reason `test_tibe.c`
+keeps its trial count small -- see `BCHK_TODO.md` phase 8's now
+higher-priority NTT-based-multiplication note, and phase 8's
+Docker-wiring implications (Phase 7 will need to budget for this cost
+per real decapsulation, not just per test run).
 
 ## Validation
 
@@ -429,9 +544,27 @@ of a byte-exact diff.
   matters for security, not just internal consistency -- `E(vk0) -
   E(vk1)` really is a unit (`ring_inv` succeeds and the product with it
   is `1`) for two distinct freshly-generated `vk`s.
+- `test_threshold`: a cheap, direct check (no `ring_mul`, so fast) that
+  Shamir-sharing has the real threshold property -- reconstructing
+  `s_a`/`e_a` from all `N` or from exactly `T=5` shares (a non-trivial
+  subset, `{2,4,6,8,10}`, not just `{1..5}`) matches the original, and
+  reconstructing from only `T-1=4` shares does *not* -- plus one full,
+  expensive (~35 min, see "Performance") run of the real 3-round
+  protocol: real Shamir shares, a real WOTS+-embedded identity, real
+  pairwise masking, a non-trivial active set, checking both
+  `threshold_combine`'s own `F_vk*z==r` assertion and that the
+  recovered message matches what was actually encrypted. Below-threshold
+  and malicious-party (lying about `w_i`) behavior at the *full protocol*
+  level are not separately tested end to end, given the per-cycle cost
+  -- the cheap Shamir check above covers the threshold property directly,
+  and the commit-then-reveal check exists in the code
+  (`threshold_round2`'s commitment-verification loop) but isn't yet
+  exercised by an automated malicious-party test; flagged in
+  `BCHK_TODO.md` as a known gap rather than silently skipped.
 
-All five currently pass (`test_tibe` takes roughly half an hour;
-everything else is well under 2 minutes each). Representative output:
+All six currently pass (`test_tibe` takes roughly half an hour,
+`test_threshold` roughly 35 minutes; everything else is well under 2
+minutes each). Representative output:
 
 ```
 ./test/test_ring
@@ -450,4 +583,6 @@ test_wots: all tests passed
 test_tibe: all tests passed
 ./test/test_identity
 test_identity: all tests passed
+./test/test_threshold
+test_threshold: all tests passed
 ```

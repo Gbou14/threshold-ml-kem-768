@@ -106,12 +106,56 @@ ML-KEM.
         Phase 3 above since it's needed for Decrypt's own algebra, not
         just identity embedding, stays there; Phase 4 turned out to be
         exactly the identity-embedding work its name always implied
-- [ ] Phase 5: Shamir-share `(s_a, e_a)` as ring elements + the 3-round
+- [x] Phase 5: Shamir-share `(s_a, e_a)` + the real 3-round
       `ShareExtract_{0,1,2}`/`Combine` threshold-decryption protocol
-      (`BCHK_PAPER_SPEC.md` Sec 4.5) -- commit/reveal + pairwise-PRF
-      masking. **Must independently re-derive the z2 sign (see Phase 3
-      above) against the real Algorithm 7/8, not copy Phase 3's direct
-      stand-in's fix unchecked.**
+      (`src/tibe/threshold.c`)
+  - [x] Coefficient-wise `(T,[N])`-Shamir sharing of ring elements,
+        generalizing `src/kyber/threshold.c`'s int32/mod-3329
+        construction to BIGNUM/mod-q; pairwise PRF seed distribution
+        for round-2 masking (dealer hands both parties in a pair the
+        same seed, matching Remark 1's trusted-channel model)
+  - [x] `z2` sign independently re-verified against the real
+        multi-party Algorithm 7/8 (not just copied from Phase 3's
+        single-party fix) -- confirmed unchanged (`z2 = -c0`) via a
+        symbolic toy-ring check of the full protocol (real masking,
+        real T-of-N Lagrange reconstruction) and this phase's own
+        end-to-end C test
+  - [x] Caught a second, more consequential algebra issue empirically:
+        Algorithm 5 line 2's `y_{i,0}` was initially read as the scalar
+        `a0*p_{i,0}+p_{i,1}` (raw, unpublished `a0`), which broke the
+        full multi-party correctness algebra regardless of the `z2`
+        sign, even with masking/Lagrange independently verified
+        correct in isolation. Fix: `y_{i,0} = A0.p_i`, a proper
+        3-vector dot product against the *published* `A0`, mirroring
+        `y_{i,1}`/`y_{i,2}`'s own pattern -- found via a symbolic
+        toy-ring check across hypotheses, confirmed exactly (real
+        masking, real T-of-N reconstruction, non-trivial active sets)
+        and then in the real C implementation. Consequence: no
+        shareholder needs raw `a0` at all (an `a0` field briefly added
+        to `tibe_msk`/`threshold_share` under the wrong reading was
+        removed once the fix landed) -- see `src/tibe/README.md`
+        "The real 3-round threshold protocol" for the full writeup.
+  - [x] `make test` passes (`test_ring` through `test_threshold`,
+        6 suites) -- includes one full, real (not single-party
+        stand-in) `T=5`-of-`N=10` decapsulation: real Shamir shares,
+        real WOTS+-embedded identity, real pairwise masking, a
+        non-trivial active set (`{2,4,6,8,10}`), recovering the
+        actual encrypted message. Cost: ~35 minutes for that one
+        cycle (see `src/tibe/README.md` "Performance") -- raises
+        Phase 8's NTT-based-multiplication priority further, and is a
+        real budgeting consideration for Phase 7's Docker wiring.
+  - [ ] Not tested end to end at the full-protocol level (documented
+        gap, not silently skipped, given per-cycle cost): below-T
+        threshold behavior and malicious-party (lying about `w_i`)
+        detection. The commit-then-reveal check exists in
+        `threshold_round2`'s code; the cheap Shamir-only test covers
+        the threshold property directly. A future session should
+        decide whether this gap needs closing before any publication
+        claim about robustness/cheating-detection specifically (the
+        base paper isn't robust either way -- Table 1 in
+        `BCHK_PAPER_SPEC.md` -- so this is about validating the
+        *detection* property that does exist, not adding
+        robustness).
 - [ ] Phase 6: the BCHK+ TKEM layer (`Keygen`/`Encaps`/`ShareDecaps`/
       `Combine`, Sec 4.6) -- wraps TIBE + WOTS+ + the FO consistency
       check (`G_fo`/`H_fo`, re-encryption check on the now-public `msg`)

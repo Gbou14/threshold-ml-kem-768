@@ -63,4 +63,8 @@
 #define TIBE_R2_HEX "35e60067ff2563d93b2ff3c8c"
 /* = 266892166039080060530265635980 */
 
+/* Phase 5: the 3-round threshold-decryption protocol. */
+#define TIBE_CMT_BYTES 32  /* H_cmt : R_q -> {0,1}^{2*kappa}, kappa=128 */
+#define TIBE_SEED_BYTES 32 /* pairwise PRF seeds for the round-2 masking */
+
 #endif /* TIBE_PARAMS_H */

@@ -179,7 +179,12 @@ tibe_setup(tibe_ek* ek, tibe_msk* msk, BN_CTX* ctx)
 
     /* d0, a0 <- R_q^x x R_q. Uniform sampling for d0: overwhelming
      * odds it lands in the unit group R_q^x (see test_ring.c's
-     * test_inverse comment for why). */
+     * test_inverse comment for why). d0 alone is retained in msk (not
+     * freed at the end of this function): it's not published in ek,
+     * but Decomp_beta(d0^-1*...) needs it directly in Decrypt/Combine
+     * (Algorithm 7 line 5). a0 is only needed locally, to build A0/b0
+     * -- Algorithm 5's round-0 blinding uses A0 directly (a proper
+     * A0.p_i dot product, see threshold.c), not raw a0. */
     ring_random_uniform(&msk->d0, ctx);
     ring_random_uniform(&a0, ctx);
 

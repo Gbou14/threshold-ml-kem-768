@@ -6,15 +6,17 @@ SRCS := ring.c gauss.c
 SRCS_WOTS := wots.c
 SRCS_TIBE := ring.c gauss.c tibe.c
 SRCS_IDENTITY := ring.c wots.c identity.c
+SRCS_THRESHOLD := ring.c gauss.c tibe.c wots.c identity.c threshold.c
 
 .PHONY: test clean
 
-test: test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity
+test: test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity test/test_threshold
 	./test/test_ring
 	./test/test_gauss
 	./test/test_wots
 	./test/test_tibe
 	./test/test_identity
+	./test/test_threshold
 
 test/test_ring: test/test_ring.c $(SRCS) $(wildcard *.h)
 	$(CC) $(CFLAGS) -o $@ test/test_ring.c $(SRCS) $(LDLIBS)
@@ -31,5 +33,8 @@ test/test_tibe: test/test_tibe.c $(SRCS_TIBE) $(wildcard *.h)
 test/test_identity: test/test_identity.c $(SRCS_IDENTITY) $(wildcard *.h)
 	$(CC) $(CFLAGS) -o $@ test/test_identity.c $(SRCS_IDENTITY) $(LDLIBS)
 
+test/test_threshold: test/test_threshold.c $(SRCS_THRESHOLD) $(wildcard *.h)
+	$(CC) $(CFLAGS) -o $@ test/test_threshold.c $(SRCS_THRESHOLD) $(LDLIBS)
+
 clean:
-	rm -f test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity *.o
+	rm -f test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity test/test_threshold *.o
