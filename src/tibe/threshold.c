@@ -299,6 +299,56 @@ threshold_contrib2_free(threshold_contrib2* c)
     }
 }
 
+size_t
+threshold_contrib2_serialized_bytes(void)
+{
+    return 9 * ring_serialized_bytes();
+}
+
+void
+threshold_contrib2_serialize(uint8_t* out, const threshold_contrib2* c)
+{
+    size_t rb = ring_serialized_bytes();
+    uint8_t* p = out;
+    for (int i = 0; i < 3; i++)
+    {
+        ring_serialize(p, &c->z[i]);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_serialize(p, &c->x0[i]);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_serialize(p, &c->x1[i]);
+        p += rb;
+    }
+}
+
+void
+threshold_contrib2_deserialize(threshold_contrib2* c, const uint8_t* in)
+{
+    size_t rb = ring_serialized_bytes();
+    const uint8_t* p = in;
+    for (int i = 0; i < 3; i++)
+    {
+        ring_deserialize(&c->z[i], p);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_deserialize(&c->x0[i], p);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_deserialize(&c->x1[i], p);
+        p += rb;
+    }
+}
+
 void
 threshold_setup(threshold_share shares_out[TIBE_N], const tibe_msk* msk, BN_CTX* ctx)
 {
@@ -342,6 +392,48 @@ threshold_setup(threshold_share shares_out[TIBE_N], const tibe_msk* msk, BN_CTX*
             memcpy(shares_out[i].pairwise_seed[j], pairseed, TIBE_SEED_BYTES);
             memcpy(shares_out[j].pairwise_seed[i], pairseed, TIBE_SEED_BYTES);
         }
+    }
+}
+
+size_t
+threshold_share_private_serialized_bytes(void)
+{
+    return 3 * ring_serialized_bytes() + (size_t)TIBE_N * TIBE_SEED_BYTES;
+}
+
+void
+threshold_share_private_serialize(uint8_t* out, const threshold_share* s)
+{
+    size_t rb = ring_serialized_bytes();
+    uint8_t* p = out;
+    ring_serialize(p, &s->share_s_a);
+    p += rb;
+    ring_serialize(p, &s->share_e_a);
+    p += rb;
+    ring_serialize(p, &s->d0);
+    p += rb;
+    for (int i = 0; i < TIBE_N; i++)
+    {
+        memcpy(p, s->pairwise_seed[i], TIBE_SEED_BYTES);
+        p += TIBE_SEED_BYTES;
+    }
+}
+
+void
+threshold_share_private_deserialize(threshold_share* s, const uint8_t* in)
+{
+    size_t rb = ring_serialized_bytes();
+    const uint8_t* p = in;
+    ring_deserialize(&s->share_s_a, p);
+    p += rb;
+    ring_deserialize(&s->share_e_a, p);
+    p += rb;
+    ring_deserialize(&s->d0, p);
+    p += rb;
+    for (int i = 0; i < TIBE_N; i++)
+    {
+        memcpy(s->pairwise_seed[i], p, TIBE_SEED_BYTES);
+        p += TIBE_SEED_BYTES;
     }
 }
 

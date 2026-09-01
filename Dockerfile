@@ -17,9 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /data
 WORKDIR /app
-COPY --from=builder /build/shareholder  .
-COPY --from=builder /build/dealer       .
-COPY --from=builder /build/coordinator  .
-COPY --from=builder /build/test_openssl .
+COPY --from=builder /build/shareholder      .
+COPY --from=builder /build/dealer           .
+COPY --from=builder /build/coordinator      .
+COPY --from=builder /build/test_openssl     .
+COPY --from=builder /build/tibe_shareholder .
+COPY --from=builder /build/tibe_dealer      .
+COPY --from=builder /build/tibe_coordinator .
 EXPOSE 8080
 CMD ["./shareholder", "8080"]

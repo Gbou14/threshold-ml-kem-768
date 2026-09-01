@@ -58,6 +58,27 @@ docker compose down
 Don't use `docker compose up --abort-on-container-exit` -- see the
 comment block in `docker-compose.yml` for why that kills the run.
 
+## The BCHK+ redesign (this branch only: `bchk-redesign`)
+
+This branch also contains a from-scratch, parallel implementation of a
+*different* threshold KEM -- Lapiha & Prest's BCHK+ construction
+(Asiacrypt 2025), chosen specifically to avoid the one trust
+concession described below ("What's next"), not by patching this
+Kyber scheme but by implementing a different paper's construction
+end to end. It lives entirely alongside the code above, which stays
+untouched and fully working (`git diff master -- src/kyber/` is
+empty) as the fallback and comparison point.
+
+Start with [`BCHK_TODO.md`](BCHK_TODO.md) for the roadmap and
+[`src/tibe/README.md`](src/tibe/README.md) for the cryptographic
+detail. The parallel Docker demo (`docker-compose.tibe.yml`,
+`src/tibe_dealer.c`, `src/tibe_shareholder.c`,
+`src/tibe_coordinator.c`) runs independently of the one above -- see
+the comment block at the top of `docker-compose.tibe.yml`, and note
+its real cost warning: this module has no NTT-based multiplication
+yet, so a single decapsulation takes on the order of 30 minutes, not
+seconds.
+
 ## What's next
 
 The current scope (documented in `TODO.md` and `src/kyber/README.md`)

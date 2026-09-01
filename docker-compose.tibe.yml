@@ -1,0 +1,161 @@
+# ── BCHK+ threshold-KEM decapsulation — 5-of-10 multi-container demo ────────
+#
+# The TIBE/BCHK+ counterpart to docker-compose.yml's Kyber-side demo --
+# a SEPARATE compose file, not a modification of the working Kyber demo
+# (which stays fully intact; run both independently). Real, full
+# BCHK+ threshold KEM (src/tibe/tkem.c): a fresh one-time WOTS+
+# signature is bound to every ciphertext, so every shareholder
+# independently verifies it *before* doing any threshold-decryption
+# work -- unlike the Kyber demo's threshold_decaps, no party is
+# trusted for CCA security here, not even the coordinator. See
+# src/tibe/README.md "The actual trust-model delta" for the precise
+# claim, and BCHK_TODO.md for the roadmap this is Phase 7 of.
+#
+# REAL COST WARNING: this module is BIGNUM-based (no NTT), and a
+# single decapsulation at T=5/N=10 takes on the order of 30 minutes on
+# typical development hardware -- see src/tibe/README.md
+# "Performance". N_TRIALS defaults to 1 here, not the Kyber demo's
+# 200. Budget real time to run this, not seconds.
+#
+# Startup order:
+#   1. tsh1..tsh10 start (shareholder HTTP servers) -- they answer
+#      /health immediately, then lazily wait for the dealer's ek/d0 on
+#      the shared volume the first time /round0 is called (can't
+#      block on it at startup without deadlocking the dealer's own
+#      wait-for-healthy loop)
+#   2. tibe_dealer   runs TKEM.Keygen (TIBE.Setup), Shamir-shares
+#                    (s_a,e_a) across all 10 parties, sends each
+#                    shareholder its own private share over HTTP, and
+#                    writes ek + d0 (not secret-shared, see
+#                    src/tibe/tibe.h's tibe_msk comment) to
+#                    ./data/tibe_ek.bin / ./data/tibe_d0.bin
+#   3. tibe_coordinator  runs N_TRIALS (default 1) of: real
+#                    tkem_encaps -> round0 (collect commitments from
+#                    the 5-party active set) -> round1 (collect
+#                    reveals) -> round2 (each party re-verifies
+#                    everyone else's reveal, returns its contribution)
+#                    -> tkem_combine -> AES-256-GCM round trip keyed
+#                    directly from the shared secret. Writes results
+#                    to ./data/tibe_results.csv
+#
+# No party, including the dealer after it exits, ever holds (s_a,e_a)
+# again -- only individual Shamir shares exist from that point on.
+#
+# Running it:
+#   docker compose -f docker-compose.tibe.yml up -d
+#   docker wait tibe_coordinator
+#   docker compose -f docker-compose.tibe.yml logs tibe_coordinator
+#   cat data/tibe_results.csv
+#   docker compose -f docker-compose.tibe.yml down
+#
+# Don't use `up --abort-on-container-exit`, same reason as the Kyber
+# demo's docker-compose.yml: tibe_dealer is a one-shot job that's
+# *expected* to exit, and that flag tears down the shareholders out
+# from under the coordinator the moment it does.
+#
+# Experiments:
+#   # Use a different 5-party active set (must be exactly TIBE_T=5
+#   # x-coordinates, each in [1,TIBE_N=10]):
+#   docker compose -f docker-compose.tibe.yml run --rm \
+#     -e TIBE_ACT_X=1,3,5,7,9 tibe_coordinator
+#
+#   # More trials (budget ~30 min EACH):
+#   docker compose -f docker-compose.tibe.yml run --rm \
+#     -e N_TRIALS=2 tibe_coordinator
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  tibe-net:
+    driver: bridge
+
+x-tsh-base: &tsh-base
+  build: .
+  networks: [tibe-net]
+  command: ["./tibe_shareholder", "8080"]
+  expose: ["8080"]
+  volumes:
+    - ./data:/data # read-only in practice: only tibe_ek.bin/tibe_d0.bin, written by tibe_dealer
+  restart: "no"
+
+services:
+
+  # ── Share-holders (T=5 of N=10) ─────────────────────────────────────────
+  tsh1:
+    <<: *tsh-base
+    container_name: tsh1
+    hostname: tsh1
+  tsh2:
+    <<: *tsh-base
+    container_name: tsh2
+    hostname: tsh2
+  tsh3:
+    <<: *tsh-base
+    container_name: tsh3
+    hostname: tsh3
+  tsh4:
+    <<: *tsh-base
+    container_name: tsh4
+    hostname: tsh4
+  tsh5:
+    <<: *tsh-base
+    container_name: tsh5
+    hostname: tsh5
+  tsh6:
+    <<: *tsh-base
+    container_name: tsh6
+    hostname: tsh6
+  tsh7:
+    <<: *tsh-base
+    container_name: tsh7
+    hostname: tsh7
+  tsh8:
+    <<: *tsh-base
+    container_name: tsh8
+    hostname: tsh8
+  tsh9:
+    <<: *tsh-base
+    container_name: tsh9
+    hostname: tsh9
+  tsh10:
+    <<: *tsh-base
+    container_name: tsh10
+    hostname: tsh10
+
+  # ── Dealer ────────────────────────────────────────────────────────────────
+  tibe_dealer:
+    build: .
+    container_name: tibe_dealer
+    hostname: tibe_dealer
+    networks: [tibe-net]
+    command: ["./tibe_dealer"]
+    environment:
+      TIBE_SHAREHOLDER_HOSTS: "tsh1,tsh2,tsh3,tsh4,tsh5,tsh6,tsh7,tsh8,tsh9,tsh10"
+      TIBE_SHAREHOLDER_PORT: "8080"
+      TIBE_EK_PATH: "/data/tibe_ek.bin"
+      TIBE_D0_PATH: "/data/tibe_d0.bin"
+    volumes:
+      - ./data:/data # tibe_ek.bin, tibe_d0.bin appear here
+    depends_on: [tsh1, tsh2, tsh3, tsh4, tsh5, tsh6, tsh7, tsh8, tsh9, tsh10]
+    restart: "no"
+
+  # ── Coordinator ───────────────────────────────────────────────────────────
+  tibe_coordinator:
+    build: .
+    container_name: tibe_coordinator
+    hostname: tibe_coordinator
+    networks: [tibe-net]
+    command: ["./tibe_coordinator"]
+    environment:
+      TIBE_SHAREHOLDER_HOSTS: "tsh1,tsh2,tsh3,tsh4,tsh5,tsh6,tsh7,tsh8,tsh9,tsh10"
+      TIBE_SHAREHOLDER_PORT: "8080"
+      TIBE_ACT_X: "2,4,6,8,10"
+      N_TRIALS: "1"
+      OUTPUT_FILE: "/data/tibe_results.csv"
+      TIBE_EK_PATH: "/data/tibe_ek.bin"
+      TIBE_D0_PATH: "/data/tibe_d0.bin"
+    volumes:
+      - ./data:/data # tibe_results.csv appears here
+    depends_on:
+      tibe_dealer:
+        condition: service_completed_successfully
+    restart: "no"

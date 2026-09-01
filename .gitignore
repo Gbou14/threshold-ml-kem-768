@@ -26,3 +26,6 @@ src/shareholder
 src/dealer
 src/coordinator
 src/test_openssl
+src/tibe_shareholder
+src/tibe_dealer
+src/tibe_coordinator

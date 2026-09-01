@@ -129,6 +129,100 @@ tibe_ct_eq(const tibe_ct* a, const tibe_ct* b)
     return ring_eq(&a->v, &b->v);
 }
 
+size_t
+tibe_ek_serialized_bytes(void)
+{
+    return 13 * ring_serialized_bytes();
+}
+
+void
+tibe_ek_serialize(uint8_t* out, const tibe_ek* ek)
+{
+    size_t rb = ring_serialized_bytes();
+    uint8_t* p = out;
+    for (int i = 0; i < 3; i++)
+    {
+        ring_serialize(p, &ek->A0[i]);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_serialize(p, &ek->A1[i]);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_serialize(p, &ek->A2[i]);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_serialize(p, &ek->G[i]);
+        p += rb;
+    }
+    ring_serialize(p, &ek->r);
+}
+
+void
+tibe_ek_deserialize(tibe_ek* ek, const uint8_t* in)
+{
+    size_t rb = ring_serialized_bytes();
+    const uint8_t* p = in;
+    for (int i = 0; i < 3; i++)
+    {
+        ring_deserialize(&ek->A0[i], p);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_deserialize(&ek->A1[i], p);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_deserialize(&ek->A2[i], p);
+        p += rb;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        ring_deserialize(&ek->G[i], p);
+        p += rb;
+    }
+    ring_deserialize(&ek->r, p);
+}
+
+size_t
+tibe_ct_serialized_bytes(void)
+{
+    return 10 * ring_serialized_bytes();
+}
+
+void
+tibe_ct_serialize(uint8_t* out, const tibe_ct* ct)
+{
+    size_t rb = ring_serialized_bytes();
+    uint8_t* p = out;
+    for (int i = 0; i < 9; i++)
+    {
+        ring_serialize(p, &ct->u[i]);
+        p += rb;
+    }
+    ring_serialize(p, &ct->v);
+}
+
+void
+tibe_ct_deserialize(tibe_ct* ct, const uint8_t* in)
+{
+    size_t rb = ring_serialized_bytes();
+    const uint8_t* p = in;
+    for (int i = 0; i < 9; i++)
+    {
+        ring_deserialize(&ct->u[i], p);
+        p += rb;
+    }
+    ring_deserialize(&ct->v, p);
+}
+
 void
 tibe_encode(ring_elem* out, const uint8_t msg[TIBE_MSG_BYTES], BN_CTX* ctx)
 {

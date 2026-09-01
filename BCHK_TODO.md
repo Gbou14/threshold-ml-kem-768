@@ -191,9 +191,64 @@ ML-KEM.
     `tkem_combine` call independently verifies the WOTS+ signature
     *before* touching a Shamir share or doing any TIBE-layer work,
     confirmed directly by `test_tkem.c`'s tampered-ciphertext test.
-- [ ] Phase 7: wire into `dealer.c`/`shareholder.c`/`coordinator.c`/
-      `docker-compose.yml` -- extend the HTTP protocol to 3 rounds,
-      N=10/T=5 topology
+- [x] Phase 7: live multi-container Docker demo (`docker-compose.tibe.yml`,
+      `src/tibe_dealer.c`, `src/tibe_shareholder.c`, `src/tibe_coordinator.c`)
+  - [x] A *separate* compose file/demo, not a modification of
+        `docker-compose.yml`/`dealer.c`/`shareholder.c`/`coordinator.c`
+        -- the Kyber demo stays fully intact and independently runnable
+  - [x] `tibe_dealer`: `tkem_keygen`, `threshold_setup` (real
+        Shamir-sharing across `N=10`), writes `ek`/`d0` to the shared
+        volume (both quasi-public -- see `src/tibe/tibe.h`'s
+        `tibe_msk` comment), POSTs each shareholder's own private
+        share over HTTP
+  - [x] `tibe_shareholder`: `/health`, `/store_share`, `/round0`,
+        `/round1`, `/round2` -- lazily loads `ek` from the shared
+        volume on first `/round0` call (can't block on it at startup
+        without deadlocking the dealer's wait-for-healthy loop, since
+        shareholders must answer `/health` before the dealer can even
+        run); one session (one decapsulation) at a time via global
+        state, matching `shareholder.c`'s existing architecture
+  - [x] `tibe_coordinator`: `tkem_encaps` -> round0 (collect all
+        commitments before revealing anything) -> round1 (collect all
+        reveals) -> round2 (send the *full* collected set to every
+        active party) -> `tkem_combine` -> AES-256-GCM demo round trip,
+        `N_TRIALS` defaulting to 1 (not the Kyber demo's 200), given
+        the real per-trial cost
+  - [x] Payloads are far larger than the Kyber demo's (a ring element
+        serializes to ~53 KB; `ek` alone ~692 KB; a full ciphertext
+        ~535 KB) -- `tibe_shareholder`'s request-body handling uses a
+        dynamically-grown buffer, not `shareholder.c`'s fixed 8 KB one
+  - [x] Verified `tibe_shareholder.c` compiles cleanly against real
+        `libmicrohttpd` inside the Docker build (couldn't be
+        compile-checked on this host -- `libmicrohttpd-dev` isn't
+        installed and sudo isn't available -- so the Docker build was
+        the first real compile check for that file, and it passed
+        clean, no warnings)
+  - [x] Found and fixed a real, if latent and harmless-there, bug
+        while diagnosing an apparent stall in the first live run:
+        every `wait_healthy` helper (this module's and the *existing*
+        Kyber demo's `dealer.c`/`coordinator.c`) uses
+        `CURLOPT_NOBODY`, which makes curl issue an HTTP `HEAD`
+        request -- but `/health` handlers (this module's and the
+        existing `shareholder.c`'s) only matched `GET`, so every
+        health check 404s and `wait_healthy` always burns its full
+        retry budget (~5 minutes for `tibe_coordinator`'s 5 hosts at
+        60 retries each) before proceeding anyway. Harmless in the
+        existing Kyber demo (`wait_healthy` doesn't gate anything
+        there either), but a real, needless multi-minute startup tax
+        -- fixed in `tibe_shareholder.c` (accepts GET or HEAD) since
+        it's this branch's own new code; the Kyber-side files were
+        left untouched, matching the "don't modify Kyber-side files"
+        branch policy, even though the same latent bug exists there
+  - [x] Dealer keygen + Shamir-sharing + share distribution to all 10
+        parties confirmed working live
+  - [x] Full `T=5`-of-`N=10` decapsulation confirmed live, first run,
+        no algebra surprises (unlike Phase 5): real HTTP across
+        round0->round1->round2->`tkem_combine`, active set
+        `{2,4,6,8,10}`, recovered the correct shared secret (matching
+        what `tkem_encaps` produced) and the AES-256-GCM round trip
+        succeeded -- `tibe_results.csv`: `0,1,1,"Hello from threshold
+        BCHK+!","Hello from threshold BCHK+!"`. `TKEM: 1/1, AES: 1/1`.
 - [ ] Phase 8 (future/stretch, explicitly out of scope for now):
   - **Ordering requirement, confirmed with the project owner**: close
     Phase 5's documented gap -- below-threshold and malicious-party

@@ -2,6 +2,7 @@
 #define TIBE_TIBE_H
 
 #include <openssl/bn.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "params.h"
@@ -101,6 +102,19 @@ void tibe_ct_free(tibe_ct* ct);
  * otherwise -- needed by tkem.c's FO-style re-encryption check
  * (TKEM.Combine asserts ct == TIBE.Encrypt(ek,vk,msg;rand)). */
 int tibe_ct_eq(const tibe_ct* a, const tibe_ct* b);
+
+/* Fixed-width serialization (13 ring elements: A0[3],A1[3],A2[3],G[3],r
+ * -- big-endian per-coefficient, same convention as ring_serialize),
+ * needed by Phase 7's Docker wiring: ek is public and shared over a
+ * volume/HTTP rather than recomputed by every party. */
+size_t tibe_ek_serialized_bytes(void);
+void tibe_ek_serialize(uint8_t* out, const tibe_ek* ek);
+void tibe_ek_deserialize(tibe_ek* ek, const uint8_t* in);
+
+/* Fixed-width serialization (10 ring elements: u[9],v). */
+size_t tibe_ct_serialized_bytes(void);
+void tibe_ct_serialize(uint8_t* out, const tibe_ct* ct);
+void tibe_ct_deserialize(tibe_ct* ct, const uint8_t* in);
 
 /* Algorithm 2: msg (TIBE_MSG_BYTES bytes, bit i = (msg[i/8] >> (i%8))
  * & 1, LSB-first within each byte -- a concrete convention the paper's

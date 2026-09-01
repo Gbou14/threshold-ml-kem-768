@@ -97,6 +97,12 @@ void threshold_round0_state_free(threshold_round0_state* s);
 void threshold_contrib2_init(threshold_contrib2* c);
 void threshold_contrib2_free(threshold_contrib2* c);
 
+/* Fixed-width serialization (9 ring elements: z[3],x0[3],x1[3]) --
+ * Phase 7's round-2 HTTP response. */
+size_t threshold_contrib2_serialized_bytes(void);
+void threshold_contrib2_serialize(uint8_t* out, const threshold_contrib2* c);
+void threshold_contrib2_deserialize(threshold_contrib2* c, const uint8_t* in);
+
 /* Dealer step: Algorithm 1 line 9 (Shamir-share s_a and e_a
  * coefficient-wise as degree-<T polynomials over Z_q, secret at x=0)
  * plus pairwise-seed generation for round 2's masking, packaged into
@@ -105,6 +111,20 @@ void threshold_contrib2_free(threshold_contrib2* c);
  * turns "one party holds (s_a,e_a,d0) directly" into "N parties each
  * hold an unreconstructable share." */
 void threshold_setup(threshold_share shares_out[TIBE_N], const tibe_msk* msk, BN_CTX* ctx);
+
+/* Serialization for the PRIVATE parts of one threshold_share -- what
+ * the dealer sends to shareholder i over its own secure channel
+ * (Phase 7's Docker wiring): the Shamir shares of (s_a, e_a), d0 (the
+ * same value for every party, but naturally travels with each
+ * shareholder's own handoff rather than needing a separate channel --
+ * see tibe.h's tibe_msk comment for why every party needs it), and the
+ * full pairwise-seed table. `x` is a plain small int, sent separately.
+ * The coordinator isn't one of the N shareholders but also needs d0
+ * for tkem_combine -- the dealer writes it to the shared volume
+ * separately for that (see BCHK_TODO.md Phase 7 / src/tibe_dealer.c). */
+size_t threshold_share_private_serialized_bytes(void);
+void threshold_share_private_serialize(uint8_t* out, const threshold_share* s);
+void threshold_share_private_deserialize(threshold_share* s, const uint8_t* in);
 
 /* Algorithm 5: fresh blinding plus `ek` (A0/A1/A2/G) and `id` --
  * doesn't touch a party's Shamir share at all (y_{i,0}=A0.p_i uses

@@ -1,4 +1,4 @@
-# TIBE / BCHK+ threshold KEM (Phase 1-6: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding, the real threshold protocol, the BCHK+ TKEM layer)
+# TIBE / BCHK+ threshold KEM (Phase 1-7: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding, the real threshold protocol, the BCHK+ TKEM layer, live Docker demo)
 
 This module is the from-scratch implementation of Lapiha & Prest, "A
 Lattice-Based IND-CCA Threshold KEM from the BCHK+ Transform" (Asiacrypt
@@ -10,24 +10,26 @@ existing threshold-ML-KEM-768 code is untouched (`git diff master --
 src/kyber/` is empty), so it stays available as the working fallback and
 comparison point if this redesign doesn't pan out.
 
-**Status: Phase 1-6 -- the full BCHK+ construction now works end to
-end.** Ring arithmetic, Gaussian sampling, WOTS+, the TIBE core
-algebra, the identity-embedding map `E`, the real 3-round
-threshold-decryption protocol, and now the BCHK+ TKEM layer
-(`tkem.c`): `Keygen`/`Encaps`/`ShareDecaps_{0,1,2}`/`Combine`, binding
-a fresh one-time WOTS+ signature to each ciphertext (so a
-shareholder rejects an invalid ciphertext *before* doing any
-threshold-decryption work -- the actual trust-model delta this whole
-redesign exists for, see below) and running the FO-style
-decapsulation-consistency check on the now-public message. Validated
-end to end: `Encaps` -> real `T=5`-of-`N=10` `ShareDecaps` -> `Combine`
-recovers the exact same shared secret `Encaps` produced, with a real
-WOTS+ keypair, real pairwise masking, and a real re-encryption check
--- see "The BCHK+ TKEM layer" below. See `../../BCHK_TODO.md` for the
-full roadmap. **The Docker demo hasn't been wired up yet, and below-
-threshold/malicious-party behavior isn't tested at the full-protocol
-level** -- both still ahead (Phase 7, with the latter explicitly
-required before scaling to the paper's proven `T=32`, Phase 8).
+**Status: Phase 1-7 -- the full BCHK+ construction works end to end,
+live, over real HTTP.** Ring arithmetic, Gaussian sampling, WOTS+, the
+TIBE core algebra, the identity-embedding map `E`, the real 3-round
+threshold-decryption protocol, the BCHK+ TKEM layer (`tkem.c`):
+`Keygen`/`Encaps`/`ShareDecaps_{0,1,2}`/`Combine`, binding a fresh
+one-time WOTS+ signature to each ciphertext (so a shareholder rejects
+an invalid ciphertext *before* doing any threshold-decryption work --
+the actual trust-model delta this whole redesign exists for, see
+below) and running the FO-style decapsulation-consistency check on the
+now-public message -- and now a live, 12-container Docker demo
+(`../../docker-compose.tibe.yml`, `../tibe_dealer.c`,
+`../tibe_shareholder.c`, `../tibe_coordinator.c`): a real dealer
+keygen + Shamir-share distribution, followed by a real `T=5`-of-`N=10`
+decapsulation over actual HTTP across all 3 rounds, confirmed on its
+first live run (`TKEM: 1/1, AES: 1/1` -- see `../../BCHK_TODO.md`
+Phase 7 for the exact result). See `../../BCHK_TODO.md` for the full
+roadmap. **Below-threshold and malicious-party behavior still isn't
+tested at the full-protocol level** -- required before scaling to the
+paper's proven `T=32` (Phase 8), per the project owner's explicit
+ordering instruction.
 
 ## The actual trust-model delta vs. `src/kyber/threshold_decaps`
 
