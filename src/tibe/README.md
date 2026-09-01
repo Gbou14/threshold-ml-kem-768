@@ -574,6 +574,19 @@ higher-priority NTT-based-multiplication note, and phase 8's
 Docker-wiring implications (Phase 7 will need to budget for this cost
 per real decapsulation, not just per test run).
 
+**Phase 8a's two full-protocol checks, measured**: `test_threshold.c`'s
+total runtime grew from ~35 minutes to **~47.5 minutes** once the
+below-threshold and malicious-party checks landed (`test_full_protocol_gaps`,
+sharing one `Setup`/`Encrypt` with both). The below-threshold check
+(`T-1=4` honest parties, real round0/round2/`Combine`) costs roughly
+`4/5` of a full cycle's round0/round2 work, as expected. The
+malicious-party check is much cheaper than a naive "run a full cycle"
+estimate would suggest: it reuses a real `T=5` round0 (~500s, the
+dominant cost) but the actual detection -- one honest party's round2
+call against the corrupted set -- returns almost immediately, since
+`threshold_round2`'s commitment-verification loop runs before any of
+the expensive `ring_inv`/masking work.
+
 **The full TKEM layer, measured**: `test_tkem.c`'s one full
 `Keygen`->`Encaps`->`ShareDecaps`(`T=5`-of-`N=10`)->`Combine` cycle
 took **~30 minutes** wall clock -- essentially the same real
@@ -645,16 +658,23 @@ of a byte-exact diff.
   protocol: real Shamir shares, a real WOTS+-embedded identity, real
   pairwise masking, a non-trivial active set, checking both
   `threshold_combine`'s own `F_vk*z==r` assertion and that the
-  recovered message matches what was actually encrypted. Below-threshold
-  and malicious-party (lying about `w_i`) behavior at the *full protocol*
-  level are not separately tested end to end, given the per-cycle cost
-  -- the cheap Shamir check above covers the threshold property directly,
-  and the commit-then-reveal check exists in the code
-  (`threshold_round2`'s commitment-verification loop) but isn't yet
-  exercised by an automated malicious-party test; flagged in
-  `BCHK_TODO.md` as a known gap, with an explicit note there that it
-  must be closed **before** attempting the larger `T=32` run in
-  Phase 8, not silently skipped or deferred indefinitely.
+  recovered message matches what was actually encrypted. **Phase 8a**
+  added two more checks at this same *full protocol* level (not just
+  the cheap Shamir-only check above), sharing one `Setup`/
+  `threshold_setup`/`Encrypt` to amortize the expensive one-time cost:
+  `T-1=4` honest parties running the real round0/round1/round2/
+  `Combine` sequence do *not* recover the correct message (checked
+  directly -- either `Combine`'s `F_vk*z==r` assertion fails, or the
+  decoded message is wrong, not assumed from the Shamir property
+  alone); and, separately, corrupting one party's revealed `w` after a
+  real round0/round1 (simulating it lying about what it committed to)
+  is caught by an honest party's round2 -- Algorithm 7 line 1's
+  commit-then-reveal check, exercised over the real protocol rather
+  than just existing in the code. The malicious-party check is
+  comparatively cheap despite reusing a full real round0 (~500s for
+  5 parties): `threshold_round2`'s commitment-verification loop runs
+  *before* any of the expensive `ring_inv`/masking work, so a caught
+  liar returns almost immediately.
 - `test_tkem`: a valid `Encaps` output verifies (cheap -- one `Encrypt`
   call, no threshold protocol); a tampered ciphertext (a flipped `v`
   coefficient, or a flipped signature byte) fails verification, and
@@ -665,7 +685,8 @@ of a byte-exact diff.
   `Combine` derives matches exactly what `Encaps` produced.
 
 All seven currently pass (`test_tibe` takes roughly half an hour,
-`test_threshold` roughly 35 minutes, `test_tkem` roughly 30 minutes;
+`test_threshold` roughly 47 minutes (up from ~35 once Phase 8a's two
+extra full-protocol checks landed), `test_tkem` roughly 30 minutes;
 everything else is well under 2 minutes each). Representative output:
 
 ```

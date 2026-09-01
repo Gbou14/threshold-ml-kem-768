@@ -253,13 +253,28 @@ ML-KEM.
       written, **in this order (confirmed with the project owner,
       2026-09-01)** -- each item is a real gate on the next, not a
       loose bag of stretch goals:
-  1. [ ] **8a -- close Phase 5's testing gap.** Below-threshold and
-        malicious-party (lying about `w_i`) behavior tested at the
-        *full protocol* level, not just the cheap Shamir-only check
-        that already exists. Cheapest place to find a correctness or
-        cheating-detection bug is here, at `T=5` (~35 min/cycle), not
-        at `T=32` (unknown, likely much larger, cost -- see 8f). This
-        is the immediate next piece of work.
+  1. [x] **8a -- close Phase 5's testing gap.** Done
+        (`src/tibe/test/test_threshold.c`'s `test_full_protocol_gaps`,
+        sharing one `Setup`/`threshold_setup`/`Encrypt` between both
+        checks to amortize the expensive one-time cost):
+        - Below-threshold: `T-1=4` honest parties running the real
+          round0/round1/round2/`Combine` sequence do *not* recover the
+          correct message -- checked directly against the actual
+          decoded output, not assumed from the Shamir-only property
+          already covered by `test_shamir_threshold_property`.
+        - Malicious party: one party's revealed `w` is corrupted after
+          a real round0/round1 (simulating it lying about what it
+          committed to); an honest party's round2 call detects and
+          rejects it -- Algorithm 7 line 1's commit-then-reveal check,
+          now exercised over the real protocol, not just present in
+          the code.
+        - Both pass. `test_threshold.c`'s total runtime grew from
+          ~35 min to ~47.5 min (measured) -- see
+          `src/tibe/README.md` "Performance" for the breakdown
+          (the malicious-party check is comparatively cheap: it
+          reuses a real 5-party round0, but detection itself returns
+          almost immediately since the commitment check runs before
+          any of round2's expensive work).
   2. [ ] **8b -- the Gaussian sampler.** Replace the Box-Muller
         approximation (`gauss.c`) with an exact, constant-time
         discrete Gaussian sampler. This is the limitation flagged
