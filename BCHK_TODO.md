@@ -249,32 +249,78 @@ ML-KEM.
         what `tkem_encaps` produced) and the AES-256-GCM round trip
         succeeded -- `tibe_results.csv`: `0,1,1,"Hello from threshold
         BCHK+!","Hello from threshold BCHK+!"`. `TKEM: 1/1, AES: 1/1`.
-- [ ] Phase 8 (future/stretch, explicitly out of scope for now):
-  - **Ordering requirement, confirmed with the project owner**: close
-    Phase 5's documented gap -- below-threshold and malicious-party
-    (lying about `w_i`) behavior tested at the *full protocol* level,
-    not just the cheap Shamir-only check -- **before** attempting the
-    larger `T=32`, more paper-faithful validation run below. Don't jump
-    to the bigger/slower parameter set until the smaller one's known
-    gaps are closed; a below-threshold or cheating-detection bug is
-    far cheaper to find and fix at `T=5` (~35 min/cycle) than at `T=32`.
-  - Validate at the paper's actual proven `T=32` before any publication
-    claim resting on the security proof (see `src/tibe/README.md`'s
-    T=5 caveat) -- only after the item above
-  - NTT-based ring multiplication if BIGNUM's ~10s/multiply proves too
-    slow once the full protocol is wired up
-  - An exact, constant-time discrete Gaussian sampler, replacing the
-    Box-Muller approximation, if a real security claim needs it
-  - Robustness (misbehaving-shareholder detection/recovery -- the 2026
-    follow-up paper's Vandermonde-sharing approach, eprint 2026/021, not
-    read yet) or distributed key generation (no DKG in the base paper
-    either) -- real research extensions, not attempted here
+- [ ] Phase 8: everything remaining before the implementation paper is
+      written, **in this order (confirmed with the project owner,
+      2026-09-01)** -- each item is a real gate on the next, not a
+      loose bag of stretch goals:
+  1. [ ] **8a -- close Phase 5's testing gap.** Below-threshold and
+        malicious-party (lying about `w_i`) behavior tested at the
+        *full protocol* level, not just the cheap Shamir-only check
+        that already exists. Cheapest place to find a correctness or
+        cheating-detection bug is here, at `T=5` (~35 min/cycle), not
+        at `T=32` (unknown, likely much larger, cost -- see 8f). This
+        is the immediate next piece of work.
+  2. [ ] **8b -- the Gaussian sampler.** Replace the Box-Muller
+        approximation (`gauss.c`) with an exact, constant-time
+        discrete Gaussian sampler. This is the limitation flagged
+        most prominently in `src/tibe/README.md` ("Gaussian
+        sampling") -- as things stand, no real security claim can be
+        made about the deployed system without this. Real
+        cryptographic engineering (rejection sampling / CDT / a
+        convolution-based construction, each with genuine precision
+        and side-channel pitfalls), not a small patch.
+  3. [ ] **8c -- robustness.** Misbehaving-shareholder detection is
+        already real (the commit-then-reveal check, once 8a confirms
+        it end to end); *recovery* (continuing correctly despite a
+        misbehaving shareholder, rather than the whole `act` set's
+        attempt simply failing) is not, matching the base paper
+        itself (Table 1: "Robust: No"). The 2026 follow-up (eprint
+        2026/021) reportedly adds this via Vandermonde secret sharing
+        at a reduced query bound -- **not read yet**; this needs its
+        own literature pass (matching the rigor Phase 0 gave the base
+        paper) before any implementation work, not an assumption that
+        it's a drop-in change to `threshold_share`'s Shamir-sharing.
+  4. [ ] **8d -- distributed key generation (DKG).** Removes the
+        trusted-dealer assumption (`Remark 1`, `src/dealer.c`'s Kyber
+        role and `src/tibe_dealer.c`'s role alike). **Neither the base
+        paper nor the 2026 follow-up specifies a DKG for this
+        construction** -- this is a materially different, larger item
+        than 8a-8c: not "implement what the paper already fully
+        specifies" but either a genuine design contribution built on
+        general MPC/DKG literature, or a scoped-down/deferred goal.
+        Flagged honestly now rather than assumed to be
+        similarly-sized to the items above; worth an explicit
+        scope/feasibility discussion before starting.
+  5. [ ] **8e -- comparison work.** The systematic, empirical
+        side-by-side data-gathering against `src/kyber/threshold_decaps`
+        (correctness rates, timing/ciphertext-size overhead) that the
+        comparison paper (see "Future: paper writeups" below) needs --
+        distinct from that paper's actual writing, which stays a
+        separate, later step.
+  6. [ ] **8f -- validate at the paper's actual proven `T=32`**, only
+        once 8a-8e above are done, not before (smaller, cheaper tests
+        first -- same reasoning as 8a's ordering relative to this).
+        Before any publication claim resting on the security proof
+        (see `src/tibe/README.md`'s T=5 caveat).
+  - NTT-based ring multiplication remains a cross-cutting item, not
+    tied to one specific step above: revisit if BIGNUM's per-multiply
+    cost makes 8f (or 8a's repeated full-protocol runs) impractically
+    slow.
+  - Once 8a-8f are done, per the project owner: begin the
+    implementation paper (see "Future: paper writeups" below) from
+    that stronger position -- known gaps closed or explicitly scoped,
+    not just Phase 1-7's happy-path validation.
 
 ## Future: paper writeups (goal, not yet started)
 
 Two papers, once the implementation is far enough along to have real
 results to report -- confirmed with the project owner as the end goal
-this whole redesign is in service of:
+this whole redesign is in service of. **Start of the implementation
+paper is gated on Phase 8a-8f above being done or explicitly scoped
+out**, not on Phase 1-7's happy-path validation alone -- confirmed
+with the project owner (2026-09-01) specifically so the paper starts
+from a position where the known gaps (testing, the Gaussian sampler,
+robustness, DKG) are closed or honestly bounded, not silently absent.
 
 1. **Implementation paper**: reproducing Lapiha & Prest's BCHK+
    threshold KEM (eprint 2025/1958) as a from-scratch, real, working
@@ -286,9 +332,11 @@ this whole redesign is in service of:
    README notes are the running material for this).
 2. **Comparison paper**: this implementation vs. `src/kyber/threshold_decaps`
    (the trusted-combiner threshold ML-KEM already built and validated in
-   this repo) -- results-based, once both systems can be measured
-   side by side (correctness rates, timing/ciphertext-size overhead,
-   and the precise trust-model delta written up rigorously; see this
+   this repo) -- results-based, once both systems can be measured side
+   by side: correctness rates, timing/ciphertext-size overhead, and
+   the precise trust-model delta written up rigorously. Phase 8e above
+   is the actual data-gathering this needs; this paper's writing is a
+   separate, later step even once 8e's numbers exist. See this
    file's `src/tibe/README.md` companion, "The actual trust-model delta
    vs. `src/kyber/threshold_decaps`", for the precise claim to build on:
    **not** "the new combiner never sees the plaintext" (false in both
