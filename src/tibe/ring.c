@@ -4,6 +4,8 @@
 #include <string.h>
 
 static BIGNUM* g_q = NULL;
+static BIGNUM* g_r1 = NULL;
+static BIGNUM* g_r2 = NULL;
 
 const BIGNUM*
 ring_modulus(void)
@@ -16,6 +18,32 @@ ring_modulus(void)
         }
     }
     return g_q;
+}
+
+static const BIGNUM*
+ring_r1(void)
+{
+    if (g_r1 == NULL)
+    {
+        if (BN_hex2bn(&g_r1, TIBE_R1_HEX) == 0)
+        {
+            abort();
+        }
+    }
+    return g_r1;
+}
+
+static const BIGNUM*
+ring_r2(void)
+{
+    if (g_r2 == NULL)
+    {
+        if (BN_hex2bn(&g_r2, TIBE_R2_HEX) == 0)
+        {
+            abort();
+        }
+    }
+    return g_r2;
 }
 
 void
@@ -479,4 +507,171 @@ ring_decomp_beta(ring_elem* c0, ring_elem* c1, const ring_elem* x, BN_CTX* ctx)
         BN_nnmod(c1->coeffs[i], c1->coeffs[i], q, ctx);
     }
     BN_free(centered);
+}
+
+void
+field_init(field_elem* f)
+{
+    for (int i = 0; i < TIBE_D / 2; i++)
+    {
+        f->c[i] = BN_new();
+        BN_zero(f->c[i]);
+    }
+}
+
+void
+field_free(field_elem* f)
+{
+    for (int i = 0; i < TIBE_D / 2; i++)
+    {
+        BN_free(f->c[i]);
+        f->c[i] = NULL;
+    }
+}
+
+void
+field_zero(field_elem* f)
+{
+    for (int i = 0; i < TIBE_D / 2; i++)
+    {
+        BN_zero(f->c[i]);
+    }
+}
+
+void
+field_copy(field_elem* dst, const field_elem* src)
+{
+    for (int i = 0; i < TIBE_D / 2; i++)
+    {
+        BN_copy(dst->c[i], src->c[i]);
+    }
+}
+
+void
+field_add(field_elem* out, const field_elem* a, const field_elem* b, BN_CTX* ctx)
+{
+    const BIGNUM* q = ring_modulus();
+    for (int i = 0; i < TIBE_D / 2; i++)
+    {
+        BN_mod_add(out->c[i], a->c[i], b->c[i], q, ctx);
+    }
+}
+
+int
+field_eq(const field_elem* a, const field_elem* b)
+{
+    for (int i = 0; i < TIBE_D / 2; i++)
+    {
+        if (BN_cmp(a->c[i], b->c[i]) != 0)
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int
+field_is_zero(const field_elem* f)
+{
+    for (int i = 0; i < TIBE_D / 2; i++)
+    {
+        if (!BN_is_zero(f->c[i]))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+void
+field_mul(field_elem* out, const field_elem* a, const field_elem* b, const BIGNUM* root, BN_CTX* ctx)
+{
+    /* Same shape as ring_mul, but wraparound multiplies by `root`
+     * (since X^{D/2} == root here) instead of negating (X^D == -1 in
+     * ring_mul's full ring). `out` must not alias `a` or `b`. */
+    const BIGNUM* q = ring_modulus();
+    const int half = TIBE_D / 2;
+    BIGNUM* prod = BN_new();
+    BIGNUM* wrapped = BN_new();
+
+    field_zero(out);
+    for (int i = 0; i < half; i++)
+    {
+        for (int j = 0; j < half; j++)
+        {
+            int k = i + j;
+            BN_mod_mul(prod, a->c[i], b->c[j], q, ctx);
+            if (k < half)
+            {
+                BN_mod_add(out->c[k], out->c[k], prod, q, ctx);
+            }
+            else
+            {
+                BN_mod_mul(wrapped, prod, root, q, ctx);
+                BN_mod_add(out->c[k - half], out->c[k - half], wrapped, q, ctx);
+            }
+        }
+    }
+    BN_free(prod);
+    BN_free(wrapped);
+}
+
+void
+ring_split(field_elem* y1, field_elem* y2, const ring_elem* m, BN_CTX* ctx)
+{
+    /* m = m_low + X^{D/2}*m_high; y_i = m_low + r_i*m_high, i.e.
+     * reduction mod (X^{D/2}-r_i) -- X^{D/2} is replaced by the
+     * scalar r_i, leaving a degree-<D/2 polynomial in each factor. */
+    const BIGNUM* q = ring_modulus();
+    const BIGNUM* r1 = ring_r1();
+    const BIGNUM* r2 = ring_r2();
+    const int half = TIBE_D / 2;
+    BIGNUM* term = BN_new();
+
+    for (int j = 0; j < half; j++)
+    {
+        BN_mod_mul(term, m->coeffs[half + j], r1, q, ctx);
+        BN_mod_add(y1->c[j], m->coeffs[j], term, q, ctx);
+
+        BN_mod_mul(term, m->coeffs[half + j], r2, q, ctx);
+        BN_mod_add(y2->c[j], m->coeffs[j], term, q, ctx);
+    }
+    BN_free(term);
+}
+
+void
+ring_unsplit(ring_elem* m, const field_elem* y1, const field_elem* y2, BN_CTX* ctx)
+{
+    /* CRT reconstruction: y1-y2 = (r1-r2)*m_high, so m_high =
+     * (y1-y2)*(r1-r2)^-1, then m_low = y1 - r1*m_high. (r1-r2) is a
+     * fixed nonzero scalar (r1 != r2 since r2 = -r1 and r1 != 0), so
+     * its inverse is a cheap one-off scalar computation, not cached. */
+    const BIGNUM* q = ring_modulus();
+    const BIGNUM* r1 = ring_r1();
+    const BIGNUM* r2 = ring_r2();
+    const int half = TIBE_D / 2;
+
+    BIGNUM* r1_minus_r2 = BN_new();
+    BN_mod_sub(r1_minus_r2, r1, r2, q, ctx);
+    BIGNUM* inv_r1_minus_r2 = BN_new();
+    BN_mod_inverse(inv_r1_minus_r2, r1_minus_r2, q, ctx);
+
+    BIGNUM* diff = BN_new();
+    BIGNUM* m_high = BN_new();
+    BIGNUM* term = BN_new();
+    for (int j = 0; j < half; j++)
+    {
+        BN_mod_sub(diff, y1->c[j], y2->c[j], q, ctx);
+        BN_mod_mul(m_high, diff, inv_r1_minus_r2, q, ctx);
+        BN_copy(m->coeffs[half + j], m_high);
+
+        BN_mod_mul(term, r1, m_high, q, ctx);
+        BN_mod_sub(m->coeffs[j], y1->c[j], term, q, ctx);
+    }
+
+    BN_free(r1_minus_r2);
+    BN_free(inv_r1_minus_r2);
+    BN_free(diff);
+    BN_free(m_high);
+    BN_free(term);
 }

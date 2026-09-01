@@ -313,6 +313,124 @@ test_decomp_beta(BN_CTX* ctx)
     ring_free(&reconstructed);
 }
 
+static void
+test_split_unsplit_roundtrip(BN_CTX* ctx)
+{
+    ring_elem a, back;
+    field_elem y1, y2;
+    ring_init(&a);
+    ring_init(&back);
+    field_init(&y1);
+    field_init(&y2);
+    ring_random_uniform(&a, ctx);
+
+    ring_split(&y1, &y2, &a, ctx);
+    ring_unsplit(&back, &y1, &y2, ctx);
+    CHECK(ring_eq(&a, &back), "ring_unsplit(ring_split(a)) == a for a random element");
+
+    ring_free(&a);
+    ring_free(&back);
+    field_free(&y1);
+    field_free(&y2);
+}
+
+static void
+test_split_additive_homomorphism(BN_CTX* ctx)
+{
+    ring_elem a, b, sum;
+    field_elem a1, a2, b1, b2, sum1, sum2, expected1, expected2;
+    ring_init(&a);
+    ring_init(&b);
+    ring_init(&sum);
+    field_init(&a1);
+    field_init(&a2);
+    field_init(&b1);
+    field_init(&b2);
+    field_init(&sum1);
+    field_init(&sum2);
+    field_init(&expected1);
+    field_init(&expected2);
+
+    ring_random_uniform(&a, ctx);
+    ring_random_uniform(&b, ctx);
+    ring_add(&sum, &a, &b, ctx);
+
+    ring_split(&a1, &a2, &a, ctx);
+    ring_split(&b1, &b2, &b, ctx);
+    ring_split(&sum1, &sum2, &sum, ctx);
+    field_add(&expected1, &a1, &b1, ctx);
+    field_add(&expected2, &a2, &b2, ctx);
+
+    CHECK(field_eq(&sum1, &expected1) && field_eq(&sum2, &expected2),
+          "split(a+b) == split(a)+split(b) in both factors (f is additive)");
+
+    ring_free(&a);
+    ring_free(&b);
+    ring_free(&sum);
+    field_free(&a1);
+    field_free(&a2);
+    field_free(&b1);
+    field_free(&b2);
+    field_free(&sum1);
+    field_free(&sum2);
+    field_free(&expected1);
+    field_free(&expected2);
+}
+
+static void
+test_split_multiplicative_homomorphism(BN_CTX* ctx)
+{
+    /* The strongest available check that ring_split is a genuine RING
+     * isomorphism (not just additive): f(a*b) == f(a) "x" f(b), where
+     * "x" is each factor's OWN multiplication (field_mul mod
+     * X^{D/2}-r_i), not R_q's negacyclic ring_mul. */
+    ring_elem a, b, product;
+    field_elem a1, a2, b1, b2, product1, product2, expected1, expected2;
+    ring_init(&a);
+    ring_init(&b);
+    ring_init(&product);
+    field_init(&a1);
+    field_init(&a2);
+    field_init(&b1);
+    field_init(&b2);
+    field_init(&product1);
+    field_init(&product2);
+    field_init(&expected1);
+    field_init(&expected2);
+
+    ring_random_uniform(&a, ctx);
+    ring_random_uniform(&b, ctx);
+    ring_mul(&product, &a, &b, ctx);
+
+    ring_split(&a1, &a2, &a, ctx);
+    ring_split(&b1, &b2, &b, ctx);
+    ring_split(&product1, &product2, &product, ctx);
+
+    BIGNUM* r1 = BN_new();
+    BIGNUM* r2 = BN_new();
+    BN_hex2bn(&r1, TIBE_R1_HEX);
+    BN_hex2bn(&r2, TIBE_R2_HEX);
+    field_mul(&expected1, &a1, &b1, r1, ctx);
+    field_mul(&expected2, &a2, &b2, r2, ctx);
+
+    CHECK(field_eq(&product1, &expected1) && field_eq(&product2, &expected2),
+          "split(a*b) == split(a) *_field split(b) in both factors (f is multiplicative)");
+
+    BN_free(r1);
+    BN_free(r2);
+    ring_free(&a);
+    ring_free(&b);
+    ring_free(&product);
+    field_free(&a1);
+    field_free(&a2);
+    field_free(&b1);
+    field_free(&b2);
+    field_free(&product1);
+    field_free(&product2);
+    field_free(&expected1);
+    field_free(&expected2);
+}
+
 int
 main(void)
 {
@@ -326,6 +444,8 @@ main(void)
     test_mul_identity_and_zero(ctx);
     test_negacyclic_wraparound(ctx);
     test_decomp_beta(ctx);
+    test_split_unsplit_roundtrip(ctx);
+    test_split_additive_homomorphism(ctx);
 
     clock_t start = clock();
     test_distributivity(ctx);
@@ -336,6 +456,11 @@ main(void)
     test_inverse(ctx);
     secs = (double)(clock() - start) / CLOCKS_PER_SEC;
     printf("(ring_inv check took %.1fs)\n", secs);
+
+    start = clock();
+    test_split_multiplicative_homomorphism(ctx);
+    secs = (double)(clock() - start) / CLOCKS_PER_SEC;
+    printf("(split multiplicative-homomorphism check took %.1fs)\n", secs);
 
     BN_CTX_free(ctx);
 

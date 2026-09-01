@@ -79,11 +79,33 @@ ML-KEM.
         `src/tibe/README.md` "Performance"; raises the priority of
         Phase 8's NTT-based-multiplication stretch goal for when
         Phase 5-7 need many more ring operations per decapsulation
-- [ ] Phase 4: identity-embedding map `E` (the `F_{d/2} x F_{d/2}`
-      ring-splitting isomorphism, `BCHK_PAPER_SPEC.md` Sec 3.5 / open
-      question #3) -- `d0` inversion was re-scoped into Phase 3 above,
-      since it's needed for Decrypt's own algebra, not just identity
-      embedding
+- [x] Phase 4: identity-embedding map `E` (`src/tibe/identity.c`,
+      `ring_split`/`ring_unsplit`/`field_mul` in `src/tibe/ring.c`)
+  - [x] `r1`, `r2` splitting roots derived and independently
+        re-verified (`gen_params.py` re-checks `r1^2 == -1 mod q` on
+        every run, not just once by hand)
+  - [x] `ring_split`/`ring_unsplit` (the `R_q ~ F_{D/2} x F_{D/2}`
+        isomorphism, Lemma 1) validated as a genuine ring isomorphism,
+        not just an additive bookkeeping trick: round-trip, additive
+        homomorphism, AND multiplicative homomorphism (`field_mul`
+        mod `X^{D/2}-r_i` matches `ring_mul` mod `X^D+1` after
+        splitting) all checked directly in `test_ring.c`
+  - [x] `identity_embed_field` (`E_F`): SHAKE-256-based, WOTS+ `vk` ->
+        nonzero `F_{D/2}` element; `identity_embed` (`E`) calls the
+        general `ring_unsplit(y,y)` rather than a hand-derived
+        shortcut, so a bug in the "obvious" simplification (E(vk)'s
+        low D/2 coefficients = E_F(vk), high D/2 = 0) can't silently
+        diverge from the paper's actual `f^-1(E_F(vk),E_F(vk))`
+        definition
+  - [x] The actual security property (`E(vk0)-E(vk1)` is a unit for
+        `vk0 != vk1`) checked directly via `ring_inv` succeeding on
+        real WOTS+ keypairs in `test_identity.c`, not just argued for
+        in a comment
+  - [x] `make test` passes (`test_ring`, `test_gauss`, `test_wots`,
+        `test_tibe`, `test_identity`) -- `d0` inversion, re-scoped into
+        Phase 3 above since it's needed for Decrypt's own algebra, not
+        just identity embedding, stays there; Phase 4 turned out to be
+        exactly the identity-embedding work its name always implied
 - [ ] Phase 5: Shamir-share `(s_a, e_a)` as ring elements + the 3-round
       `ShareExtract_{0,1,2}`/`Combine` threshold-decryption protocol
       (`BCHK_PAPER_SPEC.md` Sec 4.5) -- commit/reveal + pairwise-PRF

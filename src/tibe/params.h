@@ -53,4 +53,14 @@
  * same style as TIBE_SIGMA_P. */
 #define TIBE_SIGMA_PRIME 524288.0 /* = 2^19 */
 
+/* r1, r2: the ring-splitting roots (Phase 4), satisfying
+ * X^D+1 = (X^{D/2}-r1)(X^{D/2}-r2) mod q for any power-of-two D --
+ * r1 = sqrt(-1) mod q (guaranteed to exist since q = 5 mod 8 implies
+ * q = 1 mod 4), r2 = -r1 mod q. Derived by gen_params.py and
+ * re-verified there (r1^2 == -1 mod q) each run. */
+#define TIBE_R1_HEX "ca19ff9800da9c26c4d00c489"
+/* = 1000758434189149340966437569673 */
+#define TIBE_R2_HEX "35e60067ff2563d93b2ff3c8c"
+/* = 266892166039080060530265635980 */
+
 #endif /* TIBE_PARAMS_H */

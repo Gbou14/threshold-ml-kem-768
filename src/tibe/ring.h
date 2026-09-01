@@ -21,6 +21,16 @@ typedef struct
     BIGNUM* coeffs[TIBE_D];
 } ring_elem;
 
+/* One factor of R_q ~ F_{D/2} x F_{D/2} (Lemma 1, BCHK_PAPER_SPEC.md
+ * Sec 1 / Sec 3.5): an element of Z_q[X]/(X^{D/2}-r) for r in
+ * {TIBE_R1_HEX, TIBE_R2_HEX}, represented the same way as ring_elem
+ * but with half as many coefficients. See ring_split/ring_unsplit/
+ * field_mul below. */
+typedef struct
+{
+    BIGNUM* c[TIBE_D / 2];
+} field_elem;
+
 /* The shared modulus q, lazily initialized on first call from
  * TIBE_Q_HEX. Owned by the library; callers must not free it. */
 const BIGNUM* ring_modulus(void);
@@ -92,5 +102,35 @@ void ring_inv(ring_elem* out, const ring_elem* a, BN_CTX* ctx);
  * an approximation). BCHK_PAPER_SPEC.md Sec 1 "Decomp_beta". c0, c1
  * must already be ring_init'd and must not alias `x` or each other. */
 void ring_decomp_beta(ring_elem* c0, ring_elem* c1, const ring_elem* x, BN_CTX* ctx);
+
+/* field_elem lifecycle, mirroring ring_elem's. */
+void field_init(field_elem* f);
+void field_free(field_elem* f);
+void field_zero(field_elem* f);
+void field_copy(field_elem* dst, const field_elem* src);
+void field_add(field_elem* out, const field_elem* a, const field_elem* b, BN_CTX* ctx);
+int field_eq(const field_elem* a, const field_elem* b);
+int field_is_zero(const field_elem* f);
+
+/* out := a*b in Z_q[X]/(X^{D/2}-root) (root is TIBE_R1_HEX or
+ * TIBE_R2_HEX as a BIGNUM, or any other root of the same defining
+ * relation -- the reduction rule X^{D/2}==root is the only thing this
+ * function needs). Schoolbook, O((D/2)^2) -- about 4x cheaper than a
+ * full ring_mul over R_q. `out` must not alias `a` or `b`. */
+void field_mul(field_elem* out, const field_elem* a, const field_elem* b, const BIGNUM* root, BN_CTX* ctx);
+
+/* f: R_q -> F_{D/2} x F_{D/2}, the isomorphism from Lemma 1 (reduction
+ * mod each of the two factors X^{D/2}-r1, X^{D/2}-r2 -- a ring
+ * homomorphism onto each factor by construction, hence onto the
+ * product by CRT, since gcd(X^{D/2}-r1, X^{D/2}-r2)=1 for r1!=r2).
+ * Concretely: writing m = m_low + X^{D/2}*m_high (m_low = coefficients
+ * [0,D/2), m_high = coefficients [D/2,D)), y1 = m_low + r1*m_high,
+ * y2 = m_low + r2*m_high. y1, y2 must already be field_init'd. */
+void ring_split(field_elem* y1, field_elem* y2, const ring_elem* m, BN_CTX* ctx);
+
+/* f^-1: F_{D/2} x F_{D/2} -> R_q, the inverse of ring_split (CRT
+ * reconstruction): m_high = (y1-y2)*(r1-r2)^-1, m_low = y1 - r1*m_high.
+ * `m` must already be ring_init'd. */
+void ring_unsplit(ring_elem* m, const field_elem* y1, const field_elem* y2, BN_CTX* ctx);
 
 #endif /* TIBE_RING_H */

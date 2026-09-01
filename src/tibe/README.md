@@ -1,4 +1,4 @@
-# TIBE / BCHK+ threshold KEM (Phase 1-3: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra)
+# TIBE / BCHK+ threshold KEM (Phase 1-4: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding)
 
 This module is the from-scratch implementation of Lapiha & Prest, "A
 Lattice-Based IND-CCA Threshold KEM from the BCHK+ Transform" (Asiacrypt
@@ -10,14 +10,18 @@ existing threshold-ML-KEM-768 code is untouched (`git diff master --
 src/kyber/` is empty), so it stays available as the working fallback and
 comparison point if this redesign doesn't pan out.
 
-**Status: Phase 1-3.** Ring arithmetic, Gaussian sampling, WOTS+, and
-now the core TIBE encryption/decryption algebra (`tibe.c`) -- validated
-end to end, but **still non-threshold**: `tibe_setup` produces the
-whole master secret in one place, and `tibe_decrypt_direct` is a
-single-party stand-in for the real 3-round `ShareExtract`/`Combine`
-protocol. See `../../BCHK_TODO.md` for the full roadmap. **Nothing in
-this module does actual threshold decryption yet, and Encaps/decaps at
-the TKEM/BCHK+ layer (binding a WOTS+ signature to a ciphertext) hasn't
+**Status: Phase 1-4.** Ring arithmetic, Gaussian sampling, WOTS+, the
+core TIBE encryption/decryption algebra, and now the identity-embedding
+map `E` (`identity.c`) that turns a fresh WOTS+ verification key into
+the unit ring element `tibe_encrypt`/`tibe_decrypt_direct` expect as
+`id` -- so a real WOTS+ keypair can now be used end to end instead of
+Phase 3's placeholder random unit. Still **non-threshold**:
+`tibe_setup` produces the whole master secret in one place, and
+`tibe_decrypt_direct` is a single-party stand-in for the real 3-round
+`ShareExtract`/`Combine` protocol. See `../../BCHK_TODO.md` for the
+full roadmap. **Nothing in this module does actual threshold decryption
+yet, and Encaps/decaps at the TKEM/BCHK+ layer (binding a WOTS+
+signature to a ciphertext, running the FO consistency check) hasn't
 been wired up either** -- both are still ahead.
 
 ## The actual trust-model delta vs. `src/kyber/threshold_decaps`
@@ -88,18 +92,20 @@ exactly. No distributed key generation exists in either scheme.
   three Gaussian widths this project uses, and this project's `(T,N)`
   choice. See "Parameter choices" below for how `q` was derived and why
   `T=5` (not the paper's proven `T=32`) is safe to use unchanged.
-- `gen_params.py` -- the reproducible derivation script for `q` (and,
-  for a later phase, the ring-splitting roots `r1`/`r2`). Not part of
-  the build; re-run it to independently reproduce every constant in
-  `params.h`.
+- `gen_params.py` -- the reproducible derivation script for `q` and the
+  ring-splitting roots `r1`/`r2`. Not part of the build; re-run it to
+  independently reproduce every constant in `params.h`.
 - `ring.c`/`.h` -- `R_q = Z[X]/(X^d + 1)`: add, sub, negate,
   scalar-multiply, negacyclic-convolution multiply, uniform sampling,
   fixed-width serialization, general ring-element inversion
   (`ring_inv`, polynomial extended Euclidean algorithm -- needed
   starting Phase 3, see "TIBE core algebra" below for why this ended
   up here rather than in the identity-embedding phase it was
-  originally scoped under), and `ring_decomp_beta` (the paper's
-  `Decomp_beta`). See "Why BIGNUM" below.
+  originally scoped under), `ring_decomp_beta` (the paper's
+  `Decomp_beta`), and, new this phase, the `R_q ~ F_{D/2} x F_{D/2}`
+  splitting isomorphism (`ring_split`/`ring_unsplit`/`field_mul`/
+  `field_elem`) -- see "Identity embedding" below. See "Why BIGNUM"
+  below for the module's general BIGNUM-vs-fixed-width rationale.
 - `gauss.c`/`.h` -- discrete-Gaussian-*approximating* sampling at an
   arbitrary width. See "Gaussian sampling" below for the approximation
   this makes and why.
@@ -109,8 +115,12 @@ exactly. No distributed key generation exists in either scheme.
   3 scope), `Encode`/`Decode`, `Encrypt`, and `tibe_decrypt_direct` (a
   single-party stand-in for the real threshold-decryption protocol).
   See "TIBE core algebra" below.
+- `identity.c`/`.h` -- the identity-embedding map `E`, turning a fresh
+  WOTS+ verification key into the unit ring element `tibe_encrypt`/
+  `tibe_decrypt_direct` need as `id`. See "Identity embedding" below.
 - `test/test_ring.c`, `test/test_gauss.c`, `test/test_wots.c`,
-  `test/test_tibe.c` -- the regression suites (see "Validation" below).
+  `test/test_tibe.c`, `test/test_identity.c` -- the regression suites
+  (see "Validation" below).
 
 ## Parameter choices
 
@@ -127,6 +137,19 @@ tool with no relation to this project's own code). Result:
 
 ```
 q = 1267650600228229401496703205653  (0x10000000000000000000000115), 101 bits, q = 5 (mod 8)
+```
+
+**`r1`, `r2`** (Phase 4): the splitting roots satisfying `X^D+1 =
+(X^{D/2}-r1)(X^{D/2}-r2) mod q`, needed for `R_q`'s `F_{D/2} x F_{D/2}`
+isomorphism. `gen_params.py` computes `r1 = sqrt(-1) mod q` via the
+closed-form square-root formula for primes `q = 5 (mod 8)`, `r2 = -r1
+mod q`; both `q = 5 (mod 8)` (guaranteeing `-1` is a quadratic residue)
+and `r1^2 == -1 (mod q)` are re-checked in the script itself on every
+run, not just asserted once by hand.
+
+```
+r1 = 1000758434189149340966437569673  (0xca19ff9800da9c26c4d00c489)
+r2 = 266892166039080060530265635980  (0x35e60067ff2563d93b2ff3c8c)
 ```
 
 **`T=5, N=10`** (not the paper's proven `T=32`): confirmed with the
@@ -283,6 +306,63 @@ step) -- hand-verifying dense multi-matrix ring algebra from page
 images is genuinely error-prone, and an end-to-end round-trip test
 catches what a page-by-page transcription review did not.
 
+## Identity embedding
+
+`identity.c` implements `E : S_vk -> R_q` (the paper's Sec 4.2
+"Identity Embedding"), the map that lets a fresh WOTS+ verification key
+serve as a TIBE identity. Two pieces, both in `ring.c`/`identity.c`:
+
+- **`ring_split`/`ring_unsplit`** (`ring.c`): the `R_q ~ F_{D/2} x
+  F_{D/2}` isomorphism `f`/`f^-1` from Lemma 1, using the `r1`/`r2`
+  splitting roots (see "Parameter choices"). Concretely: writing a ring
+  element as `m = m_low + X^{D/2}*m_high` (its low and high halves),
+  `f(m) = (m_low + r1*m_high, m_low + r2*m_high)` -- reduction mod each
+  of the two factors `X^{D/2}-r1`, `X^{D/2}-r2`. This is automatically
+  a ring homomorphism (reduction mod an ideal always is) and, by CRT
+  (the two ideals are coprime since `r1 != r2`), an isomorphism onto
+  the product -- validated directly, not just asserted: `test_ring.c`
+  checks `f` is a mutual inverse of `f^-1`, is additive
+  (`f(a+b)==f(a)+f(b)`), and -- the strongest check -- **multiplicative**
+  (`f(a*b) == f(a) *_field f(b)`, using each factor's own `field_mul`,
+  mod `X^{D/2}-r_i` rather than `R_q`'s `X^D+1`), confirming `f` is a
+  genuine ring isomorphism rather than just a convenient additive
+  bookkeeping trick.
+- **`identity_embed_field`** (`E_F`, `identity.c`): a WOTS+ `vk`
+  (`seed || vk1`, 512 bits) hashed via domain-separated SHAKE-256 into
+  a nonzero element of `F_{D/2}` (`TIBE_D/2 = 2048` coefficients, each
+  reduced mod `q`) -- collision-resistant rather than formally
+  injective, which the paper's own analysis says suffices here
+  (`BCHK_PAPER_SPEC.md` open question #4: `|S_vk| = 2^512` is
+  astronomically smaller than `|F_{D/2}| ~ q^2048`, so a coincidental
+  collision that also breaks the security property is independently
+  negligible). Retries (domain-separated by a trailing counter byte,
+  never expected to actually fire) if a hash output ever lands on the
+  zero element.
+
+`identity_embed` (`E`) is then literally `ring_unsplit(y, y)` for `y =
+E_F(vk)` -- embedding the *same* field value into both factors, exactly
+the paper's own `E(vk) := f^-1(E_F(vk), E_F(vk))` definition, implemented
+by calling the general `ring_unsplit` rather than a hand-derived
+shortcut. It happens to work out algebraically to "`E(vk)`'s low `D/2`
+coefficients are `E_F(vk)`, high `D/2` coefficients are 0" (since
+`y1==y2` makes `ring_unsplit`'s `m_high = (y1-y2)*(r1-r2)^-1` term
+vanish) -- but that simplification is left for `ring_unsplit` itself to
+produce, not special-cased in `identity.c`, so a bug in the "obvious"
+shortcut can't silently diverge from the paper's actual definition.
+
+**The security property this all exists for** -- for `vk0 != vk1`,
+`E(vk0)-E(vk1)` must be a unit in `R_q` (needed by the paper's security
+proof, `BCHK_PAPER_SPEC.md` Sec 3.5) -- is checked directly in
+`test_identity.c`, not just argued for: `E(vk0)-E(vk1)` is inverted via
+`ring_inv`, and the product with that inverse is checked to equal `1`.
+The argument for *why* this holds (embedding the same value into both
+factors means the difference's image under `f` is `(d, d)` for `d =
+E_F(vk0)-E_F(vk1)`, a nonzero coefficient vector that is therefore
+nonzero in *either* factor field regardless of which of the two
+different multiplication rules is imposed on it, hence a unit by CRT)
+is recorded in `identity.h`'s header comment -- but the test doesn't
+trust the argument, it checks the actual inversion succeeds.
+
 ## Performance
 
 A full `Setup` + `Encrypt` + `Decrypt` cycle at this module's real
@@ -317,13 +397,15 @@ of a byte-exact diff.
   multiplication), one dense-random distributivity check (`a*(b+c) ==
   a*b + a*c`, the real stress test of convolution + mod-`q` reduction
   together), `Decomp_beta` reconstruction (`c0*beta+c1 == x`) and
-  boundedness (`|c1| <= beta/2`) checks, and `ring_inv` correctness
+  boundedness (`|c1| <= beta/2`) checks, `ring_inv` correctness
   (`a * ring_inv(a) == 1` for a random, overwhelmingly-likely-unit
-  `a`). The dense multiply and `ring_inv` checks are the slow ones
-  (~30s and comparable respectively, both O(d^2)); the sparse
-  identity/zero/wraparound checks are much faster in practice, since a
-  zero `BIGNUM` operand makes `BN_mod_mul` nearly instant even though
-  the O(d^2) loop still runs.
+  `a`), and the `ring_split`/`ring_unsplit` isomorphism checks
+  described in "Identity embedding" above (round trip, additive, and
+  multiplicative homomorphism). The dense multiply, `ring_inv`, and
+  multiplicative-homomorphism checks are the slow ones (all O(d^2) or
+  close to it); the sparse identity/zero/wraparound checks and the
+  split/unsplit round-trip/additive checks are much faster in
+  practice (the latter are only O(d), not O(d^2)).
 - `test_gauss`: empirical mean/stddev checks (20,000 samples each) at
   every width this project's Table 2 instantiation actually uses
   (`TIBE_SIGMA_A=8`, `TIBE_SIGMA=4`, `TIBE_SIGMA_P=2^47`), with
@@ -341,14 +423,21 @@ of a byte-exact diff.
   because of the ~9-10 minute-per-cycle cost, see "Performance" above)
   that check both `tibe_decrypt_direct`'s own `F_vk*z==r` assertion and
   that the recovered message matches what was encrypted.
+- `test_identity`: `E_F(vk)` is nonzero, `E(vk)` actually satisfies its
+  own definition (`split(E(vk)) == (E_F(vk), E_F(vk))`), 3 distinct
+  `vk`s give 3 pairwise-distinct `E(vk)` values, and -- the one that
+  matters for security, not just internal consistency -- `E(vk0) -
+  E(vk1)` really is a unit (`ring_inv` succeeds and the product with it
+  is `1`) for two distinct freshly-generated `vk`s.
 
-All four currently pass (`test_tibe` takes roughly half an hour;
-everything else is under a minute). Representative output:
+All five currently pass (`test_tibe` takes roughly half an hour;
+everything else is well under 2 minutes each). Representative output:
 
 ```
 ./test/test_ring
 (distributivity dense-multiply check took 29.3s)
 (ring_inv check took 37.6s)
+(split multiplicative-homomorphism check took 15.8s)
 test_ring: all tests passed
 ./test/test_gauss
   sigma=8: n=20000 empirical mean=-0.01435 empirical stddev=8.031
@@ -359,4 +448,6 @@ test_gauss: all tests passed
 test_wots: all tests passed
 ./test/test_tibe
 test_tibe: all tests passed
+./test/test_identity
+test_identity: all tests passed
 ```
