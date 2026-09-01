@@ -163,9 +163,17 @@ ML-KEM.
       `docker-compose.yml` -- extend the HTTP protocol to 3 rounds,
       N=10/T=5 topology
 - [ ] Phase 8 (future/stretch, explicitly out of scope for now):
+  - **Ordering requirement, confirmed with the project owner**: close
+    Phase 5's documented gap -- below-threshold and malicious-party
+    (lying about `w_i`) behavior tested at the *full protocol* level,
+    not just the cheap Shamir-only check -- **before** attempting the
+    larger `T=32`, more paper-faithful validation run below. Don't jump
+    to the bigger/slower parameter set until the smaller one's known
+    gaps are closed; a below-threshold or cheating-detection bug is
+    far cheaper to find and fix at `T=5` (~35 min/cycle) than at `T=32`.
   - Validate at the paper's actual proven `T=32` before any publication
     claim resting on the security proof (see `src/tibe/README.md`'s
-    T=5 caveat)
+    T=5 caveat) -- only after the item above
   - NTT-based ring multiplication if BIGNUM's ~10s/multiply proves too
     slow once the full protocol is wired up
   - An exact, constant-time discrete Gaussian sampler, replacing the
