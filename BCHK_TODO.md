@@ -156,9 +156,41 @@ ML-KEM.
         `BCHK_PAPER_SPEC.md` -- so this is about validating the
         *detection* property that does exist, not adding
         robustness).
-- [ ] Phase 6: the BCHK+ TKEM layer (`Keygen`/`Encaps`/`ShareDecaps`/
-      `Combine`, Sec 4.6) -- wraps TIBE + WOTS+ + the FO consistency
-      check (`G_fo`/`H_fo`, re-encryption check on the now-public `msg`)
+- [x] Phase 6: the BCHK+ TKEM layer (`src/tibe/tkem.c`)
+  - [x] `tkem_keygen` (`==tibe_setup`), `tkem_encaps`/
+        `tkem_encaps_derand` (fresh WOTS+ keypair every call, `G_fo`
+        derandomization, `H_fo` shared-secret derivation),
+        `tkem_verify_ct` (the actual BCHK check), `tkem_share_decaps_
+        {0,1,2}` (wrap `threshold_round0/1/2` with the verify check
+        prepended), `tkem_combine` (wraps `threshold_combine`, then
+        the FO re-encryption consistency check)
+  - [x] Added `tibe_encrypt_derand` to `tibe.c` (explicit-seed form of
+        `Encrypt`; `tibe_encrypt` is now a thin wrapper) and a
+        `gauss_prg`/`gauss_sample_from_prg` deterministic sampling
+        path to `gauss.c`, refactored to share the same Box-Muller
+        core as the original `RAND_bytes`-driven path -- needed so
+        `Combine`'s re-encryption check can reproduce a ciphertext
+        deterministically from a re-derived seed
+      - Validated the refactor didn't perturb the original
+        (non-derandomized) path: existing `gauss_sample`/
+        `gauss_sample_coeff` statistics unchanged, a new statistical
+        check on the `gauss_prg` path, and `test_tibe.c`'s full
+        `Setup->Encrypt->Decrypt` suite re-run and still passing now
+        that `tibe_encrypt` routes through `tibe_encrypt_derand`
+  - [x] `make test` passes (`test_ring` through `test_tkem`, 7 suites)
+        -- includes one full, real `Keygen->Encaps->ShareDecaps
+        (T=5-of-N=10)->Combine` cycle: real WOTS+ keypair, real
+        threshold decryption, real FO-style re-encryption check,
+        confirming the shared secret `Combine` derives matches what
+        `Encaps` produced. No algebra surprises this phase (unlike
+        Phase 5) -- built cleanly on top of already-validated
+        primitives. ~30 minutes for that one cycle.
+  - Note: the actual trust-model delta this whole redesign targets
+    (`src/tibe/README.md` "The actual trust-model delta") is now
+    real, not aspirational -- every `tkem_share_decaps_j`/
+    `tkem_combine` call independently verifies the WOTS+ signature
+    *before* touching a Shamir share or doing any TIBE-layer work,
+    confirmed directly by `test_tkem.c`'s tampered-ciphertext test.
 - [ ] Phase 7: wire into `dealer.c`/`shareholder.c`/`coordinator.c`/
       `docker-compose.yml` -- extend the HTTP protocol to 3 rounds,
       N=10/T=5 topology

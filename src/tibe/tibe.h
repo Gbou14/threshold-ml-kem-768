@@ -37,6 +37,11 @@
 #define TIBE_MSG_BITS TIBE_D
 #define TIBE_MSG_BYTES (TIBE_D / 8) /* 512 bytes for D=4096 */
 
+/* Seed size for tibe_encrypt_derand -- what tkem.c's G_fo(msg) must
+ * produce. Expanded internally (gauss_prg) into the actual (s,e,e')
+ * randomness TIBE.Encrypt needs. */
+#define TIBE_ENCRYPT_SEED_BYTES 32
+
 /* Public parameters, Algorithm 1 line 8 ("ek := (A0,A1,A2,G,r)"). Each
  * of A0/A1/A2/G is 3 ring elements (a 1x3 row, per the paper's
  * notation); F_vk = [A0 | A1-id*G | A2] concatenates these into the
@@ -92,6 +97,11 @@ void tibe_msk_free(tibe_msk* msk);
 void tibe_ct_init(tibe_ct* ct);
 void tibe_ct_free(tibe_ct* ct);
 
+/* 1 if every ring element of a and b (all 9 u's and v) is equal, 0
+ * otherwise -- needed by tkem.c's FO-style re-encryption check
+ * (TKEM.Combine asserts ct == TIBE.Encrypt(ek,vk,msg;rand)). */
+int tibe_ct_eq(const tibe_ct* a, const tibe_ct* b);
+
 /* Algorithm 2: msg (TIBE_MSG_BYTES bytes, bit i = (msg[i/8] >> (i%8))
  * & 1, LSB-first within each byte -- a concrete convention the paper's
  * abstract msg=(b_0,...,b_{d-1}) notation leaves open, documented here
@@ -110,7 +120,19 @@ void tibe_decode(uint8_t msg_out[TIBE_MSG_BYTES], const ring_elem* m, BN_CTX* ct
  * already be inited via tibe_ek_init/tibe_msk_init. */
 void tibe_setup(tibe_ek* ek, tibe_msk* msk, BN_CTX* ctx);
 
-/* Algorithm 4. `ct` must already be inited via tibe_ct_init. */
+/* Algorithm 4, explicit-randomness ("derandomized") form: `seed`
+ * (TIBE_ENCRYPT_SEED_BYTES bytes) deterministically drives every
+ * random draw (s, e[9], e') via gauss_prg/gauss_sample_from_prg
+ * (gauss.h) instead of RAND_bytes -- so the same (ek,id,msg,seed)
+ * always produces the same ciphertext. This is what tkem.c's Encaps
+ * uses (seed = G_fo(msg)) and what Combine's FO-style re-encryption
+ * check needs to reproduce a ciphertext deterministically. `ct` must
+ * already be inited via tibe_ct_init. */
+void tibe_encrypt_derand(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t msg[TIBE_MSG_BYTES],
+                          const uint8_t seed[TIBE_ENCRYPT_SEED_BYTES], BN_CTX* ctx);
+
+/* Algorithm 4: tibe_encrypt_derand with a fresh random seed. `ct` must
+ * already be inited via tibe_ct_init. */
 void tibe_encrypt(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t msg[TIBE_MSG_BYTES],
                    BN_CTX* ctx);
 

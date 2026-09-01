@@ -1,5 +1,8 @@
 #include "tibe.h"
 
+#include <openssl/rand.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "gauss.h"
@@ -111,6 +114,19 @@ tibe_ct_free(tibe_ct* ct)
         ring_free(&ct->u[i]);
     }
     ring_free(&ct->v);
+}
+
+int
+tibe_ct_eq(const tibe_ct* a, const tibe_ct* b)
+{
+    for (int i = 0; i < 9; i++)
+    {
+        if (!ring_eq(&a->u[i], &b->u[i]))
+        {
+            return 0;
+        }
+    }
+    return ring_eq(&a->v, &b->v);
 }
 
 void
@@ -263,8 +279,13 @@ build_f_vk(ring_elem f_vk[9], const tibe_ek* ek, const ring_elem* id, BN_CTX* ct
     ring_free(&id_g);
 }
 
+/* 11 ring elements' worth of Box-Muller draws (s + e[9] + e'), 16
+ * bytes (two 8-byte uniform01 draws) per coefficient. */
+#define TIBE_ENCRYPT_PRG_BYTES ((size_t)11 * TIBE_D * 16)
+
 void
-tibe_encrypt(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t msg[TIBE_MSG_BYTES], BN_CTX* ctx)
+tibe_encrypt_derand(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t msg[TIBE_MSG_BYTES],
+                     const uint8_t seed[TIBE_ENCRYPT_SEED_BYTES], BN_CTX* ctx)
 {
     ring_elem f_vk[9];
     for (int i = 0; i < 9; i++)
@@ -273,11 +294,14 @@ tibe_encrypt(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t 
     }
     build_f_vk(f_vk, ek, id, ctx);
 
+    gauss_prg prg;
+    gauss_prg_init(&prg, seed, TIBE_ENCRYPT_SEED_BYTES, TIBE_ENCRYPT_PRG_BYTES);
+
     /* s <- D_{R,sigma}: a single ring element -- see tibe.h's header
      * comment for why (forced by v's equation type-checking). */
     ring_elem s;
     ring_init(&s);
-    gauss_sample(&s, TIBE_SIGMA, ctx);
+    gauss_sample_from_prg(&s, TIBE_SIGMA, &prg, ctx);
 
     /* e: 9 ring elements, middle third at width sigma', the rest at
      * sigma (Algorithm 4 line 3's "D_{R^3,sigma} x D_{R^3,sigma'} x
@@ -287,12 +311,14 @@ tibe_encrypt(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t 
     {
         ring_init(&e[i]);
         double width = (i >= 3 && i < 6) ? TIBE_SIGMA_PRIME : TIBE_SIGMA;
-        gauss_sample(&e[i], width, ctx);
+        gauss_sample_from_prg(&e[i], width, &prg, ctx);
     }
 
     ring_elem eprime;
     ring_init(&eprime);
-    gauss_sample(&eprime, TIBE_SIGMA, ctx);
+    gauss_sample_from_prg(&eprime, TIBE_SIGMA, &prg, ctx);
+
+    gauss_prg_free(&prg);
 
     /* u[k] := F_vk[k]*s + e[k] (F_vk^T*s is scalar broadcast since s
      * is a single ring element, per the header comment). */
@@ -320,6 +346,18 @@ tibe_encrypt(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t 
     ring_free(&eprime);
     ring_free(&encoded);
     ring_free(&r_s);
+}
+
+void
+tibe_encrypt(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t msg[TIBE_MSG_BYTES], BN_CTX* ctx)
+{
+    uint8_t seed[TIBE_ENCRYPT_SEED_BYTES];
+    if (RAND_bytes(seed, sizeof(seed)) != 1)
+    {
+        fprintf(stderr, "tibe: RAND_bytes (encrypt seed) failed\n");
+        abort();
+    }
+    tibe_encrypt_derand(ct, ek, id, msg, seed, ctx);
 }
 
 int

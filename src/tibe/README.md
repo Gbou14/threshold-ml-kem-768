@@ -1,4 +1,4 @@
-# TIBE / BCHK+ threshold KEM (Phase 1-5: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding, the real threshold protocol)
+# TIBE / BCHK+ threshold KEM (Phase 1-6: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding, the real threshold protocol, the BCHK+ TKEM layer)
 
 This module is the from-scratch implementation of Lapiha & Prest, "A
 Lattice-Based IND-CCA Threshold KEM from the BCHK+ Transform" (Asiacrypt
@@ -10,20 +10,24 @@ existing threshold-ML-KEM-768 code is untouched (`git diff master --
 src/kyber/` is empty), so it stays available as the working fallback and
 comparison point if this redesign doesn't pan out.
 
-**Status: Phase 1-5.** Ring arithmetic, Gaussian sampling, WOTS+, the
-core TIBE encryption/decryption algebra, the identity-embedding map
-`E`, and now the real 3-round threshold-decryption protocol
-(`threshold.c`) -- `(s_a, e_a)` are genuinely Shamir-shared across
-`TIBE_N` parties, and any `TIBE_T` of them jointly recover a message
-via `ShareExtract_{0,1,2}`/`Combine`, replacing `tibe_decrypt_direct`'s
-single-party stand-in with the real thing. Validated end to end with a
-real WOTS+-embedded identity, real pairwise masking, and a non-trivial
-active set -- see "The real 3-round threshold protocol" below,
-including two more transcription issues this phase's own testing
-caught. See `../../BCHK_TODO.md` for the full roadmap. **Encaps/decaps
-at the TKEM/BCHK+ layer (binding a WOTS+ signature to a ciphertext,
-running the FO consistency check) hasn't been wired up yet, and
-neither has the Docker demo** -- both are still ahead (Phases 6-7).
+**Status: Phase 1-6 -- the full BCHK+ construction now works end to
+end.** Ring arithmetic, Gaussian sampling, WOTS+, the TIBE core
+algebra, the identity-embedding map `E`, the real 3-round
+threshold-decryption protocol, and now the BCHK+ TKEM layer
+(`tkem.c`): `Keygen`/`Encaps`/`ShareDecaps_{0,1,2}`/`Combine`, binding
+a fresh one-time WOTS+ signature to each ciphertext (so a
+shareholder rejects an invalid ciphertext *before* doing any
+threshold-decryption work -- the actual trust-model delta this whole
+redesign exists for, see below) and running the FO-style
+decapsulation-consistency check on the now-public message. Validated
+end to end: `Encaps` -> real `T=5`-of-`N=10` `ShareDecaps` -> `Combine`
+recovers the exact same shared secret `Encaps` produced, with a real
+WOTS+ keypair, real pairwise masking, and a real re-encryption check
+-- see "The BCHK+ TKEM layer" below. See `../../BCHK_TODO.md` for the
+full roadmap. **The Docker demo hasn't been wired up yet, and below-
+threshold/malicious-party behavior isn't tested at the full-protocol
+level** -- both still ahead (Phase 7, with the latter explicitly
+required before scaling to the paper's proven `T=32`, Phase 8).
 
 ## The actual trust-model delta vs. `src/kyber/threshold_decaps`
 
@@ -109,13 +113,21 @@ exactly. No distributed key generation exists in either scheme.
   below for the module's general BIGNUM-vs-fixed-width rationale.
 - `gauss.c`/`.h` -- discrete-Gaussian-*approximating* sampling at an
   arbitrary width. See "Gaussian sampling" below for the approximation
-  this makes and why.
+  this makes and why. New this phase: a deterministic ("derandomized")
+  sampling path (`gauss_prg`/`gauss_sample_from_prg`) drawing from a
+  pre-squeezed SHAKE-256 stream instead of `RAND_bytes`, needed for the
+  BCHK+ TKEM's FO-style derandomized `Encaps` -- see "The BCHK+ TKEM
+  layer" below.
 - `wots.c`/`.h` -- WOTS+, the one-time signature the BCHK+ transform
   binds to each fresh TIBE ciphertext. See "WOTS+" below.
 - `tibe.c`/`.h` -- the TIBE core algebra: `Setup` (non-threshold, Phase
   3 scope), `Encode`/`Decode`, `Encrypt`, and `tibe_decrypt_direct` (a
   single-party stand-in for the real threshold-decryption protocol).
-  See "TIBE core algebra" below.
+  See "TIBE core algebra" below. New this phase: `tibe_encrypt_derand`,
+  an explicit-seed form of `Encrypt` (`tibe_encrypt` is now a thin
+  wrapper generating a random seed and delegating to it, matching
+  `src/kyber/indcpa.c`'s own derand convention) -- needed by the TKEM
+  layer's FO-style derandomization, and `tibe_ct_eq`.
 - `identity.c`/`.h` -- the identity-embedding map `E`, turning a fresh
   WOTS+ verification key into the unit ring element `tibe_encrypt`/
   `tibe_decrypt_direct` need as `id`. See "Identity embedding" below.
@@ -125,9 +137,14 @@ exactly. No distributed key generation exists in either scheme.
   `tibe_decrypt_direct`'s single-party stand-in with genuine
   multi-party decryption. See "The real 3-round threshold protocol"
   below.
+- `tkem.c`/`.h` -- the BCHK+ TKEM layer: `Keygen`/`Encaps`/
+  `ShareDecaps_{0,1,2}`/`Combine`, binding a fresh WOTS+ signature to
+  each ciphertext and running the FO-style decapsulation-consistency
+  check. See "The BCHK+ TKEM layer" below.
 - `test/test_ring.c`, `test/test_gauss.c`, `test/test_wots.c`,
-  `test/test_tibe.c`, `test/test_identity.c`, `test/test_threshold.c`
-  -- the regression suites (see "Validation" below).
+  `test/test_tibe.c`, `test/test_identity.c`, `test/test_threshold.c`,
+  `test/test_tkem.c` -- the regression suites (see "Validation"
+  below).
 
 ## Parameter choices
 
@@ -464,6 +481,66 @@ still ahead. What Phase 5 adds is that the *decryption* itself is now
 genuinely distributed, with cheating shareholders caught via
 commit-then-reveal rather than silently trusted.
 
+## The BCHK+ TKEM layer (`tkem.c`)
+
+This is the layer that actually delivers the trust-model delta
+documented at the top of this file: `Keygen`/`Encaps`/
+`ShareDecaps_{0,1,2}`/`Combine` (Figure 3 / Sec 4.6), wrapping
+everything from Phases 1-5 with the one-time-signature binding that
+makes ciphertext validity a public, independently-checkable fact
+rather than something only the combiner discovers after the fact.
+`tkem_keygen` is literally `tibe_setup` (the paper's `TKEM.Keygen ==
+TIBE.Setup`, no TKEM-specific work); the interesting pieces are
+`Encaps` and `Combine`:
+
+- **`tkem_encaps`**: samples a random `msg`, derives `rand = G_fo(msg)`
+  (a `SHAKE-256`-based 32-byte seed, `TIBE_ENCRYPT_SEED_BYTES`), and
+  generates a **fresh** WOTS+ keypair -- every call, never reused, per
+  WOTS+'s own one-time-signature requirement (`wots.c`/`README.md`
+  "WOTS+"). It then calls `tibe_encrypt_derand(ek, id=E(vk), msg,
+  rand)` -- the new derandomized `Encrypt` this phase added -- signs
+  the serialized ciphertext with the fresh `sk`, and derives the final
+  shared secret `K = H_fo(msg||ct)`.
+- **`tkem_verify_ct`**: `SIG.Verify((vk,ct,sig))` -- the actual BCHK
+  check, on entirely public values. `tkem_share_decaps_0/1/2` each run
+  this *before* doing any of the wrapped `threshold_round0/1/2` work
+  (returning 0 immediately on failure, without ever touching a
+  shareholder's Shamir share), and `tkem_combine` runs it too --
+  matching the paper's Figure 3 exactly, where every `ShareDecaps_j`
+  and `Combine` call independently re-checks validity rather than
+  trusting an earlier check.
+- **`tkem_combine`**: after `SIG.Verify`, calls `threshold_combine`
+  (Phase 5, already checks its own `F_vk*z==r` assertion internally)
+  to recover `msg`. Then the FO-style consistency check: re-derive
+  `rand = G_fo(msg)` and re-run `tibe_encrypt_derand` with the
+  *same* `(ek, id, msg, rand)` -- since `Encrypt` is now fully
+  derandomized, this must reproduce the *exact* ciphertext
+  (`tibe_ct_eq`) for an honestly-generated `ct`. This is the whole
+  "avoid FO's threshold problem" trick made concrete: `msg` is already
+  public and safely reconstructed by the time this runs, so re-running
+  `Encrypt` here needs no thresholdization at all -- it's just a local
+  equality check, on the same footing as recomputing a hash.
+  `K = H_fo(msg||ct)` on success.
+
+**Derandomization, the piece that made this layer possible**:
+`TIBE.Encrypt` (Phase 3) originally sampled its own randomness
+(`s`, `e[9]`, `e'`) directly from `RAND_bytes` via `gauss_sample`, with
+no way to reproduce the same ciphertext twice. `tibe_encrypt_derand`
+takes an explicit 32-byte seed instead, expands it via one large
+SHAKE-256 squeeze (`gauss_prg`, `~700 KiB` for the 11 ring elements'
+worth of Box-Muller draws this needs) into a deterministic byte
+stream, and draws every random value from that stream instead
+(`gauss_sample_from_prg`) -- refactored to share the same Box-Muller
+core as the original `RAND_bytes`-driven path (`gauss.c`), so the two
+entry points can't silently drift apart. Validated two ways: the
+existing `gauss_sample`/`gauss_sample_coeff` statistical checks still
+pass unchanged (confirming the refactor didn't perturb the original
+path), a new statistical check on the `gauss_prg` path at
+`TIBE_SIGMA` (`test_gauss.c`), and, most directly, `test_tibe.c`'s
+full `Setup`->`Encrypt`->`Decrypt` suite re-run and re-passing end to
+end now that `tibe_encrypt` routes through the derandomized path
+internally.
+
 ## Performance
 
 A full `Setup` + `Encrypt` + `Decrypt` cycle at this module's real
@@ -495,6 +572,19 @@ higher-priority NTT-based-multiplication note, and phase 8's
 Docker-wiring implications (Phase 7 will need to budget for this cost
 per real decapsulation, not just per test run).
 
+**The full TKEM layer, measured**: `test_tkem.c`'s one full
+`Keygen`->`Encaps`->`ShareDecaps`(`T=5`-of-`N=10`)->`Combine` cycle
+took **~30 minutes** wall clock -- essentially the same real
+threshold-protocol cost as Phase 5's measurement above, plus
+`Encaps`'s own `Encrypt` call and `Combine`'s FO re-encryption check
+(one more `Encrypt` call each -- not separately isolated/timed here,
+but each is a single `Encrypt`'s worth of `ring_mul`s, a small
+fraction of the threshold protocol's own cost). The two cheap tests
+(`Encaps`+verify round trip, tampered-ciphertext rejection) are each
+dominated by exactly one `Encrypt` call (a couple of minutes, not the
+threshold protocol's tens of minutes) -- WOTS+ sign/verify itself is
+negligible next to the ring arithmetic.
+
 ## Validation
 
 No public reference implementation of this scheme exists anywhere (this
@@ -503,7 +593,7 @@ situation this project was already in for `src/kyber/threshold.c` and
 `threshold_decaps`, handled the same way: internal consistency instead
 of a byte-exact diff.
 
-`make test` builds and runs four self-contained suites:
+`make test` builds and runs seven self-contained suites:
 
 - `test_ring`: ring-axiom checks (additive inverse, scalar-mul identity
   and zero, serialize/deserialize round trip), an explicit
@@ -560,11 +650,21 @@ of a byte-exact diff.
   and the commit-then-reveal check exists in the code
   (`threshold_round2`'s commitment-verification loop) but isn't yet
   exercised by an automated malicious-party test; flagged in
-  `BCHK_TODO.md` as a known gap rather than silently skipped.
+  `BCHK_TODO.md` as a known gap, with an explicit note there that it
+  must be closed **before** attempting the larger `T=32` run in
+  Phase 8, not silently skipped or deferred indefinitely.
+- `test_tkem`: a valid `Encaps` output verifies (cheap -- one `Encrypt`
+  call, no threshold protocol); a tampered ciphertext (a flipped `v`
+  coefficient, or a flipped signature byte) fails verification, and
+  `tkem_share_decaps_0` rejects it before doing any TIBE-layer work;
+  and one full, expensive (~30 min, see "Performance") end-to-end run
+  of `Keygen`->`Encaps`->`ShareDecaps`(`T=5`-of-`N=10`)->`Combine`,
+  checking that every step succeeds and that the shared secret
+  `Combine` derives matches exactly what `Encaps` produced.
 
-All six currently pass (`test_tibe` takes roughly half an hour,
-`test_threshold` roughly 35 minutes; everything else is well under 2
-minutes each). Representative output:
+All seven currently pass (`test_tibe` takes roughly half an hour,
+`test_threshold` roughly 35 minutes, `test_tkem` roughly 30 minutes;
+everything else is well under 2 minutes each). Representative output:
 
 ```
 ./test/test_ring
@@ -576,6 +676,7 @@ test_ring: all tests passed
   sigma=8: n=20000 empirical mean=-0.01435 empirical stddev=8.031
   sigma=4: n=20000 empirical mean=0.04825 empirical stddev=4.019
   sigma=1.41e+14: n=20000 empirical mean=7.94e+11 empirical stddev=1.418e+14
+  [prg] sigma=4: n=20000 empirical mean=-0.02695 empirical stddev=3.997
 test_gauss: all tests passed
 ./test/test_wots
 test_wots: all tests passed
@@ -585,4 +686,6 @@ test_tibe: all tests passed
 test_identity: all tests passed
 ./test/test_threshold
 test_threshold: all tests passed
+./test/test_tkem
+test_tkem: all tests passed
 ```
