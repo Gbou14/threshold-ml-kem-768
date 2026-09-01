@@ -9,6 +9,7 @@ src/kyber/test/test_kem
 src/tibe/test/test_ring
 src/tibe/test/test_gauss
 src/tibe/test/test_wots
+src/tibe/test/test_tibe
 
 # Archived duplicate of shamir-docker/ (kept as backup, not tracked)
 shamir-docker.tar.gz

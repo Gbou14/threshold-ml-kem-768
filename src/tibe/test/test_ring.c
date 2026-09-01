@@ -223,6 +223,96 @@ test_distributivity(BN_CTX* ctx)
     ring_free(&rhs);
 }
 
+static void
+test_inverse(BN_CTX* ctx)
+{
+    /* A uniformly random ring element is a unit with overwhelming
+     * probability: R_q ~ F_{d/2} x F_{d/2} (two fields of order
+     * q^2048), so a random element fails to be a unit only if one of
+     * its two CRT components is exactly zero -- probability roughly
+     * 2/q^2048, negligible enough to not special-case here. */
+    ring_elem a, inv_a, product, one;
+    ring_init(&a);
+    ring_init(&inv_a);
+    ring_init(&product);
+    ring_init(&one);
+    ring_random_uniform(&a, ctx);
+    BN_one(one.coeffs[0]);
+
+    ring_inv(&inv_a, &a, ctx);
+    ring_mul(&product, &a, &inv_a, ctx);
+    CHECK(ring_eq(&product, &one), "a * ring_inv(a) == 1 for a random (overwhelmingly-likely-unit) a");
+
+    ring_free(&a);
+    ring_free(&inv_a);
+    ring_free(&product);
+    ring_free(&one);
+}
+
+static void
+test_decomp_beta(BN_CTX* ctx)
+{
+    ring_elem x, c0, c1, beta_times_c0, reconstructed;
+    ring_init(&x);
+    ring_init(&c0);
+    ring_init(&c1);
+    ring_init(&beta_times_c0);
+    ring_init(&reconstructed);
+    ring_random_uniform(&x, ctx);
+
+    ring_decomp_beta(&c0, &c1, &x, ctx);
+
+    BIGNUM* beta = BN_new();
+    BN_lshift(beta, BN_value_one(), TIBE_BETA_LOG2);
+    BIGNUM* half_beta = BN_new();
+    BN_rshift1(half_beta, beta);
+    const BIGNUM* q = ring_modulus();
+
+    int reconstructs = 1;
+    int bounded = 1;
+    for (int i = 0; i < TIBE_D; i++)
+    {
+        BIGNUM* term = BN_new();
+        BN_mod_mul(term, c0.coeffs[i], beta, q, ctx);
+        BN_mod_add(term, term, c1.coeffs[i], q, ctx);
+        if (BN_cmp(term, x.coeffs[i]) != 0)
+        {
+            reconstructs = 0;
+        }
+        BN_free(term);
+
+        /* |c1_i| <= beta/2, checked against c1's centered representative */
+        BIGNUM* half_q = BN_new();
+        BN_rshift1(half_q, q);
+        BIGNUM* centered_c1 = BN_new();
+        if (BN_cmp(c1.coeffs[i], half_q) > 0)
+        {
+            BN_sub(centered_c1, c1.coeffs[i], q);
+        }
+        else
+        {
+            BN_copy(centered_c1, c1.coeffs[i]);
+        }
+        BN_set_negative(centered_c1, 0); /* abs value */
+        if (BN_cmp(centered_c1, half_beta) > 0)
+        {
+            bounded = 0;
+        }
+        BN_free(half_q);
+        BN_free(centered_c1);
+    }
+    CHECK(reconstructs, "c0*beta + c1 == x (mod q) for every coefficient");
+    CHECK(bounded, "|c1_i| <= beta/2 for every coefficient");
+
+    BN_free(beta);
+    BN_free(half_beta);
+    ring_free(&x);
+    ring_free(&c0);
+    ring_free(&c1);
+    ring_free(&beta_times_c0);
+    ring_free(&reconstructed);
+}
+
 int
 main(void)
 {
@@ -235,11 +325,17 @@ main(void)
     test_serialize_roundtrip(ctx);
     test_mul_identity_and_zero(ctx);
     test_negacyclic_wraparound(ctx);
+    test_decomp_beta(ctx);
 
     clock_t start = clock();
     test_distributivity(ctx);
     double secs = (double)(clock() - start) / CLOCKS_PER_SEC;
     printf("(distributivity dense-multiply check took %.1fs)\n", secs);
+
+    start = clock();
+    test_inverse(ctx);
+    secs = (double)(clock() - start) / CLOCKS_PER_SEC;
+    printf("(ring_inv check took %.1fs)\n", secs);
 
     BN_CTX_free(ctx);
 

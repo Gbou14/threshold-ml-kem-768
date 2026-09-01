@@ -33,9 +33,24 @@
 #define TIBE_SIGMA 4.0               /* width for TIBE encryption randomness s, e, e' */
 #define TIBE_SIGMA_P 140737488355328.0 /* = 2^47, per-shareholder blinding width (noise flooding) */
 
-/* beta: offset constant in A0's construction / Decomp_beta, = 2^77.
- * Not used until Phase 3+ (TIBE.Encrypt/ShareExtract); recorded here
- * for completeness alongside the rest of Table 2. */
+/* beta: offset constant in A0's construction / Decomp_beta, = 2^77. */
 #define TIBE_BETA_LOG2 77
+
+/* sigma_RLWE: width used only in the *security proof's* trapdoor-
+ * embedding matrix R (BCHK_PAPER_SPEC.md Sec 4.1's proof machinery,
+ * Lemma 15) -- not sampled by any real protocol algorithm, recorded
+ * here only because sigma' below is defined in terms of it. */
+#define TIBE_SIGMA_RLWE 4.0
+
+/* sigma': the middle third of TIBE.Encrypt's noise vector e (Algorithm
+ * 4 line 3, "e <- D_{R^3,ς} x D_{R^3,ς'} x D_{R^3,ς}") uses this
+ * width instead of TIBE_SIGMA. Table 2 does not give sigma' directly
+ * (see BCHK_PAPER_SPEC.md open question #6) -- it is pinned by
+ * Theorem 3's correctness condition, Equation (10): sigma' >
+ * 2*sqrt(6)*d*sigma_RLWE*sigma. With d=4096, sigma_RLWE=4, sigma=4,
+ * that bound is 2*sqrt(6)*4096*4*4 ~= 321,080. 2^19 = 524288 clears it
+ * with comfortable margin while staying a clean power of two, in the
+ * same style as TIBE_SIGMA_P. */
+#define TIBE_SIGMA_PRIME 524288.0 /* = 2^19 */
 
 #endif /* TIBE_PARAMS_H */

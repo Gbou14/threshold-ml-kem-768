@@ -73,4 +73,24 @@ size_t ring_serialized_bytes(void);
 void ring_serialize(uint8_t* out, const ring_elem* a);
 void ring_deserialize(ring_elem* out, const uint8_t* in);
 
+/* out := a^-1 in R_q, i.e. a*out == 1. Requires `a` to be a unit
+ * (invertible) in R_q -- undefined (garbage, not a crash) if it isn't.
+ * Computed via the polynomial extended Euclidean algorithm over the
+ * field Z_q (q prime), treating X^D+1 as an ordinary modulus
+ * polynomial -- this works regardless of whether X^D+1 is irreducible
+ * over Z_q (it isn't, per Lemma 1's R_q ~ F_{d/2} x F_{d/2} splitting;
+ * gcd-based inversion doesn't require irreducibility, only that
+ * gcd(a, X^D+1) = 1, guaranteed when `a` is genuinely a unit). O(D^2)
+ * field operations, the same complexity class as a single ring_mul.
+ * `out` must not alias `a`. */
+void ring_inv(ring_elem* out, const ring_elem* a, BN_CTX* ctx);
+
+/* Decomp_beta(x): coefficient-wise decomposition of x's *centered*
+ * representative (each coefficient mapped from [0,q) to (-q/2, q/2]
+ * first) as x_i = c0_i*beta + c1_i with |c1_i| <= beta/2, beta =
+ * 2^TIBE_BETA_LOG2 (a power of two, so this is an exact bit-split, not
+ * an approximation). BCHK_PAPER_SPEC.md Sec 1 "Decomp_beta". c0, c1
+ * must already be ring_init'd and must not alias `x` or each other. */
+void ring_decomp_beta(ring_elem* c0, ring_elem* c1, const ring_elem* x, BN_CTX* ctx);
+
 #endif /* TIBE_RING_H */

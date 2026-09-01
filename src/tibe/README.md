@@ -1,4 +1,4 @@
-# TIBE / BCHK+ threshold KEM (Phase 1-2: ring arithmetic, Gaussian sampling, WOTS+)
+# TIBE / BCHK+ threshold KEM (Phase 1-3: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra)
 
 This module is the from-scratch implementation of Lapiha & Prest, "A
 Lattice-Based IND-CCA Threshold KEM from the BCHK+ Transform" (Asiacrypt
@@ -10,14 +10,15 @@ existing threshold-ML-KEM-768 code is untouched (`git diff master --
 src/kyber/` is empty), so it stays available as the working fallback and
 comparison point if this redesign doesn't pan out.
 
-**Status: Phase 1-2.** Ring arithmetic, Gaussian sampling, and the
-WOTS+ one-time signature -- the foundation every later phase (the TIBE
-algebra, the 3-round threshold-decryption protocol, the BCHK+ TKEM
-layer, Docker wiring) is built on. See `../../BCHK_TODO.md` for the
-full roadmap and what's not here yet. **Nothing in this module does
-threshold encryption or decryption yet** -- WOTS+ signs/verifies, but
-the BCHK+ transform that binds a signature to a threshold-IBE
-ciphertext (Sec 3.4 of the spec) is Phase 3+.
+**Status: Phase 1-3.** Ring arithmetic, Gaussian sampling, WOTS+, and
+now the core TIBE encryption/decryption algebra (`tibe.c`) -- validated
+end to end, but **still non-threshold**: `tibe_setup` produces the
+whole master secret in one place, and `tibe_decrypt_direct` is a
+single-party stand-in for the real 3-round `ShareExtract`/`Combine`
+protocol. See `../../BCHK_TODO.md` for the full roadmap. **Nothing in
+this module does actual threshold decryption yet, and Encaps/decaps at
+the TKEM/BCHK+ layer (binding a WOTS+ signature to a ciphertext) hasn't
+been wired up either** -- both are still ahead.
 
 ## The actual trust-model delta vs. `src/kyber/threshold_decaps`
 
@@ -93,14 +94,23 @@ exactly. No distributed key generation exists in either scheme.
   `params.h`.
 - `ring.c`/`.h` -- `R_q = Z[X]/(X^d + 1)`: add, sub, negate,
   scalar-multiply, negacyclic-convolution multiply, uniform sampling,
-  and fixed-width serialization. See "Why BIGNUM" below.
+  fixed-width serialization, general ring-element inversion
+  (`ring_inv`, polynomial extended Euclidean algorithm -- needed
+  starting Phase 3, see "TIBE core algebra" below for why this ended
+  up here rather than in the identity-embedding phase it was
+  originally scoped under), and `ring_decomp_beta` (the paper's
+  `Decomp_beta`). See "Why BIGNUM" below.
 - `gauss.c`/`.h` -- discrete-Gaussian-*approximating* sampling at an
   arbitrary width. See "Gaussian sampling" below for the approximation
   this makes and why.
 - `wots.c`/`.h` -- WOTS+, the one-time signature the BCHK+ transform
   binds to each fresh TIBE ciphertext. See "WOTS+" below.
-- `test/test_ring.c`, `test/test_gauss.c`, `test/test_wots.c` -- the regression suites (see
-  "Validation" below).
+- `tibe.c`/`.h` -- the TIBE core algebra: `Setup` (non-threshold, Phase
+  3 scope), `Encode`/`Decode`, `Encrypt`, and `tibe_decrypt_direct` (a
+  single-party stand-in for the real threshold-decryption protocol).
+  See "TIBE core algebra" below.
+- `test/test_ring.c`, `test/test_gauss.c`, `test/test_wots.c`,
+  `test/test_tibe.c` -- the regression suites (see "Validation" below).
 
 ## Parameter choices
 
@@ -216,6 +226,80 @@ responsibility, and it's exactly what the BCHK+ construction relies on:
 a fresh `(sk, vk)` pair is generated per `Encaps` call (Sec 3.4 /
 4.6), never reused.
 
+## TIBE core algebra
+
+`tibe.c` implements Algorithms 1 (`Setup`), 2-3 (`Encode`/`Decode`), 4
+(`Encrypt`), transcribed directly from the paper's own algorithm-box
+page images (re-read at higher fidelity than the initial secondhand
+extraction -- see `BCHK_PAPER_SPEC.md`'s header note), plus
+`tibe_decrypt_direct`: a single-party stand-in for the real threshold
+protocol (Algorithms 5-8, Figure 5), used here to validate the core
+algebra before Phase 5 adds real Shamir-sharing and the 3-round
+`ShareExtract`/`Combine` protocol on top of the same equations. It
+collapses Algorithms 7-8 to the case of one "virtual party" holding the
+whole unshared secret directly, with every per-shareholder blinding and
+masking term set to zero and a trivial Lagrange coefficient of 1.
+
+**One real ambiguity this re-read resolved**: the initial paper
+extraction (done by a different pass reading the PDF for the first
+time) rendered `TIBE.Encrypt`'s encryption randomness as `s <-
+D_{R^3,ς}` (a 3-dimensional vector), which doesn't type-check against
+`v := r*s + e' + Encode(msg)` -- `r`, `e'`, and `Encode(msg)` are each
+individually a single ring element, so `r*s` must also be a
+single-ring-element product, forcing `s` to be a single ring element
+too. Re-reading the algorithm box directly (rather than trusting the
+secondhand transcription a second time) confirmed this: `s` is a
+single ring element, and `F_vk^T * s` in the `u` equation is scalar
+broadcast (each of `F_vk`'s 9 entries scaled by the one value `s`), not
+a 9-dimensional matrix-vector product. Fixed in `BCHK_PAPER_SPEC.md`'s
+own text isn't done here (that file is a preserved snapshot of the
+original extraction pass, kept for provenance) -- the correct reading
+lives in `tibe.h`'s header comment and this section instead.
+
+**A second issue, caught only empirically**: implementing
+`tibe_decrypt_direct` literally per Algorithms 7-8 (with every
+per-shareholder term zeroed) does *not* satisfy Algorithm 8 line 7's
+own correctness assertion (`F_vk . z == r`) -- confirmed by hand
+algebra (substituting `A0 = (d0, a0*d0, b0*d0)` and `b0 = a0*s_a+e_a-
+beta` into the dot product leaves a residual `2*(e_a+a0*s_a) - beta`
+term that doesn't cancel against `beta`) and independently by a small
+symbolic check in a disposable toy ring (D=8, q=97, not committed to
+this repo). Both confirmed the same fix: `z2` must be `-c0`, not `+c0`
+as Algorithm 7/8's literal transcription reads. This is now what
+`tibe_decrypt_direct` implements, with the derivation recorded inline
+in `tibe.c`. Two honest possibilities for *why* the transcribed sign
+was wrong, neither resolved here: a PDF-extraction artifact in reading
+Algorithm 7/8's `z_{i,2}` line, or a sign-convention difference in how
+this implementation's `Decomp_beta` centers coefficients versus the
+paper's own convention. **Phase 5, which implements the real
+`ShareExtract_2`/`Combine` (not this direct stand-in), needs to
+re-derive this independently rather than assume the same one-line fix
+generalizes unchanged** -- flagged in `BCHK_TODO.md`.
+
+This is exactly the debugging methodology `src/kyber/README.md`
+documents finding real bugs with before ("only caught by checking final
+message correctness end to end," re: the missing `poly_invntt_tomont`
+step) -- hand-verifying dense multi-matrix ring algebra from page
+images is genuinely error-prone, and an end-to-end round-trip test
+catches what a page-by-page transcription review did not.
+
+## Performance
+
+A full `Setup` + `Encrypt` + `Decrypt` cycle at this module's real
+parameters (d=4096, q~2^101) takes **roughly 9-10 minutes** on this
+development machine, measured directly (`test_tibe`'s full original
+7-cycle run: 63 minutes wall clock, 35 minutes of that in actual CPU
+time). `Decrypt` is the most expensive of the three (`ring_inv`'s O(D^2)
+polynomial XGCD, on top of ~20 more O(D^2) `ring_mul` calls building
+`F_vk` twice and evaluating both dot products). `test_tibe.c`'s trial
+counts are kept deliberately small (one full round trip, plus 2 more in
+a loop -- not a larger number) specifically because of this; this is
+the real cost of "correctness-first BIGNUM, no NTT" showing up beyond
+just a single `ring_mul`, and reinforces that NTT-based multiplication
+(`BCHK_TODO.md` phase 8) will matter a lot more once Phase 5-7 need many
+more ring operations per decapsulation than this phase's single
+non-threshold decrypt does.
+
 ## Validation
 
 No public reference implementation of this scheme exists anywhere (this
@@ -224,16 +308,19 @@ situation this project was already in for `src/kyber/threshold.c` and
 `threshold_decaps`, handled the same way: internal consistency instead
 of a byte-exact diff.
 
-`make test` builds and runs three self-contained suites:
+`make test` builds and runs four self-contained suites:
 
 - `test_ring`: ring-axiom checks (additive inverse, scalar-mul identity
   and zero, serialize/deserialize round trip), an explicit
   negacyclic-wraparound check (`X^(D-1) * X == -1`, the one algebraic
   property that distinguishes this ring from plain polynomial
-  multiplication), and one dense-random distributivity check
-  (`a*(b+c) == a*b + a*c`) -- the real stress test of convolution +
-  mod-`q` reduction together. That last check alone takes about 30
-  seconds (three full O(d^2) dense multiplies); the sparse
+  multiplication), one dense-random distributivity check (`a*(b+c) ==
+  a*b + a*c`, the real stress test of convolution + mod-`q` reduction
+  together), `Decomp_beta` reconstruction (`c0*beta+c1 == x`) and
+  boundedness (`|c1| <= beta/2`) checks, and `ring_inv` correctness
+  (`a * ring_inv(a) == 1` for a random, overwhelmingly-likely-unit
+  `a`). The dense multiply and `ring_inv` checks are the slow ones
+  (~30s and comparable respectively, both O(d^2)); the sparse
   identity/zero/wraparound checks are much faster in practice, since a
   zero `BIGNUM` operand makes `BN_mod_mul` nearly instant even though
   the O(d^2) loop still runs.
@@ -248,12 +335,20 @@ of a byte-exact diff.
   tampered signature byte, and a valid signature checked against the
   wrong `vk` -- plus a sanity check that two `wots_keygen` calls
   produce different keys.
+- `test_tibe`: `Decode(Encode(msg)) == msg`, plus full
+  `Setup`->`Encrypt`->`tibe_decrypt_direct` round trips (one single
+  cycle, plus 2 more under a fresh `Setup` in a loop -- kept small
+  because of the ~9-10 minute-per-cycle cost, see "Performance" above)
+  that check both `tibe_decrypt_direct`'s own `F_vk*z==r` assertion and
+  that the recovered message matches what was encrypted.
 
-All three currently pass. Representative output:
+All four currently pass (`test_tibe` takes roughly half an hour;
+everything else is under a minute). Representative output:
 
 ```
 ./test/test_ring
-(distributivity dense-multiply check took 29.8s)
+(distributivity dense-multiply check took 29.3s)
+(ring_inv check took 37.6s)
 test_ring: all tests passed
 ./test/test_gauss
   sigma=8: n=20000 empirical mean=-0.01435 empirical stddev=8.031
@@ -262,4 +357,6 @@ test_ring: all tests passed
 test_gauss: all tests passed
 ./test/test_wots
 test_wots: all tests passed
+./test/test_tibe
+test_tibe: all tests passed
 ```

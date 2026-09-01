@@ -46,17 +46,50 @@ ML-KEM.
         sign/verify round trips, tampered-message/signature/wrong-vk
         rejection, no public reference to diff against (none exists for
         this exact instantiation)
-- [ ] Phase 3: TIBE core algebra, non-threshold (`Setup` with the full
-      secret in one place, `Encrypt`, a direct non-threshold `Decrypt`)
-      to validate the base algebra (`F_vk`, `Decomp_beta`, the
-      correctness equation) before adding Shamir/threshold complexity
+- [x] Phase 3: TIBE core algebra, non-threshold (`src/tibe/tibe.c`)
+  - [x] Re-read the paper's actual algorithm-box page images directly
+        (higher fidelity than the initial secondhand extraction) --
+        caught and fixed one real transcription issue: `Encrypt`'s
+        randomness `s` is a single ring element, not 3-dimensional
+        (forced by `v`'s equation type-checking); `BCHK_PAPER_SPEC.md`
+        itself is left as the original snapshot for provenance, the
+        correction lives in `tibe.h`/`src/tibe/README.md` instead
+  - [x] `ring_inv` (general ring-element inversion via polynomial
+        extended Euclidean algorithm over the field Z_q) and
+        `ring_decomp_beta` added to `ring.c` -- re-scoped here from
+        "Phase 4" (see below) since Decrypt's own algebra needs
+        `d0^-1` directly, independent of the identity-embedding work
+  - [x] `Setup`/`Encode`/`Decode`/`Encrypt`/`tibe_decrypt_direct`
+        (a single-party stand-in for the real threshold protocol)
+        implemented and validated by full round-trip testing
+  - [x] Caught a real algebra bug empirically (not by hand-derivation
+        alone): literal Algorithm 7/8 transcription gives `z2 = +c0`,
+        which does not satisfy Algorithm 8's own `F_vk*z==r`
+        assertion; the fix (`z2 = -c0`) was found via a disposable toy
+        symbolic check and confirmed by hand algebra, documented
+        in-line in `tibe.c` and in `src/tibe/README.md` "TIBE core
+        algebra". **Not yet re-derived against the real (threshold)
+        Algorithm 7/8 -- Phase 5 needs to check this independently
+        rather than assume the same one-line fix generalizes.**
+  - [x] `make test` passes (`test_ring`, `test_gauss`, `test_wots`,
+        `test_tibe`) -- full `Setup`->`Encrypt`->`Decrypt` round trips
+        recover the original message
+  - [x] Measured real performance: ~9-10 minutes per full
+        Setup+Encrypt+Decrypt cycle at d=4096 (BIGNUM, no NTT) -- see
+        `src/tibe/README.md` "Performance"; raises the priority of
+        Phase 8's NTT-based-multiplication stretch goal for when
+        Phase 5-7 need many more ring operations per decapsulation
 - [ ] Phase 4: identity-embedding map `E` (the `F_{d/2} x F_{d/2}`
       ring-splitting isomorphism, `BCHK_PAPER_SPEC.md` Sec 3.5 / open
-      question #3) + `d0` inversion (open question #5)
+      question #3) -- `d0` inversion was re-scoped into Phase 3 above,
+      since it's needed for Decrypt's own algebra, not just identity
+      embedding
 - [ ] Phase 5: Shamir-share `(s_a, e_a)` as ring elements + the 3-round
       `ShareExtract_{0,1,2}`/`Combine` threshold-decryption protocol
       (`BCHK_PAPER_SPEC.md` Sec 4.5) -- commit/reveal + pairwise-PRF
-      masking
+      masking. **Must independently re-derive the z2 sign (see Phase 3
+      above) against the real Algorithm 7/8, not copy Phase 3's direct
+      stand-in's fix unchecked.**
 - [ ] Phase 6: the BCHK+ TKEM layer (`Keygen`/`Encaps`/`ShareDecaps`/
       `Combine`, Sec 4.6) -- wraps TIBE + WOTS+ + the FO consistency
       check (`G_fo`/`H_fo`, re-encryption check on the now-public `msg`)
