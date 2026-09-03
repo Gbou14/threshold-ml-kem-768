@@ -843,13 +843,35 @@ ML-KEM.
                 - **Still explicitly out of scope, flagged not
                   silently assumed away**: `threshold_share.pairwise_
                   seed`'s own dealer-free establishment (used only by
-                  decapsulation itself, not by this setup layer); `A1`/
-                  `A2`/`G`/`r`, independent of the secret and not
-                  security-critical to keep unbiased the way `a0` is,
-                  still need *some* agreed generation mechanism for a
-                  real deployment (a simple public verifiable-
-                  randomness step would likely suffice, not designed
-                  here).
+                  decapsulation itself, not by this setup layer).
+                - **`A1`/`A2`/`r`, revisited more carefully before
+                  Docker wiring (2026-09-03)**: `G`'s `g` is fully safe
+                  as a plain public derivation -- `tibe_setup`'s own
+                  comment already notes it's "a fixed public constant,
+                  not random" (a pure function of `q`), so every party
+                  can compute it independently with zero coordination,
+                  no gap here at all. `A1`/`d2`/`a2`/`b2`/`r`, though,
+                  are genuinely random in `tibe_setup` -- the earlier
+                  note above calling them "not security-critical to
+                  keep unbiased" was too quick. A naive "hash of the
+                  already-broadcast `a0`/`d0` commitments" derivation
+                  for them is vulnerable to a last-mover grinding
+                  attack: since a party's own commitment is *hiding*,
+                  a malicious last-committing party could still try
+                  many candidate contributions locally before
+                  submitting, each yielding a different downstream
+                  hash-derived `A1`/`A2`/`r`, and pick whichever favors
+                  it -- the same class of concern the `a0`/`d0`
+                  coin-flip exists to prevent. The Docker demo (item 6)
+                  uses a simple deterministic derivation for these
+                  anyway, explicitly documented there as a known,
+                  scoped limitation distinct from (and not touching)
+                  the plaintext-key-exposure property that was this
+                  phase's actual goal and is fully achieved regardless
+                  -- a rigorous fix (extending `dkg_pubkey.c`'s
+                  commit-reveal to cover these 7 more ring elements
+                  the same way `a0`/`d0` are covered) is real, bounded,
+                  future work, not attempted in this pass.
         - **Items 1-5 and 7 are done and validated**: parameter
           derivation, the Merkle tree, V3S, this project's own 3-round
           tier-1 DKG protocol for `(s_a,e_a)`, its test suite, and now
