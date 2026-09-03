@@ -612,7 +612,7 @@ ML-KEM.
                 verify+reconstruct at `T` and at all `N` shares,
                 tampered-share/proof/nonce rejection, oversized-secret
                 rejection) now passes, ~23s.
-          4. [ ] **Correction before implementing, 2026-09-03**: this
+          4. [x] **Correction before implementing, 2026-09-03**: this
                 checklist previously described item 4 as "the `K1`-`K4`
                 protocol (Section 2.2)" -- **wrong**, caught on
                 re-reading before writing any code. Section 2.2's V1-V4
@@ -707,44 +707,73 @@ ML-KEM.
                   system, distinct from `(s_a,e_a)`'s DKG itself (items
                   1-4), which stands on its own and is complete and
                   tested regardless.
-          5. [ ] `test/test_dkg.c`: full `TIBE_N`-party DKG run
-                (rounds 1-3) producing a real `(T,N)`-Shamir sharing of
-                a genuinely nobody-ever-saw-the-whole-thing-during-the-
-                protocol joint `(s_a,e_a)`. Given the `b0`-reveal gap
-                just found (not yet built, see the correction above),
-                the "does this plug into the existing decapsulation
-                protocol" check is necessarily a **hybrid** validation,
-                not a fully dealer-free one: `d0`/`a0` sampled the same
-                way `tibe_setup` already does, `b0`/`A0` computed
-                *directly* from the DKG's true joint secret via a
-                test-only reconstruction (summing every party's real
-                `x^(j)`, something only the test orchestrator -- not
-                any protocol participant -- ever does, exactly
-                mirroring how `test_v3s.c` already validates its own
-                correctness this way) purely so `ek` is internally
-                consistent enough to run the real, unmodified
-                `threshold_round0/1/2`/`Combine` against the DKG-issued
-                shares and confirm decapsulation recovers the correct
-                message. This validates the genuinely load-bearing claim
-                (DKG output is a mathematically valid Shamir sharing the
-                existing protocol accepts) without overclaiming a fully
-                dealer-free system, which isn't built yet. Plus a
-                malicious-local-share detection test (tier 1's actual
-                payoff: a party submitting an oversized/inconsistent
-                local share gets caught and excluded via Round 3's
-                unanimous-positive rule, not silently corrupting the
-                joint key).
+          5. [x] `dkg.c`/`.h` implemented (this project's own 3-round
+                design above) and `test/test_dkg.c` written and
+                passing: a full `TIBE_N`-party DKG run (rounds 1-3)
+                producing a real `(T,N)`-Shamir sharing of a genuinely
+                nobody-ever-saw-the-whole-thing-during-the-protocol
+                joint `(s_a,e_a)`. Given the `b0`-reveal gap found
+                above (not yet built), the "does this plug into the
+                existing decapsulation protocol" check is necessarily a
+                **hybrid** validation, not a fully dealer-free one:
+                `d0`/`a0` sampled the same way `tibe_setup` already
+                does, `b0`/`A0` computed *directly* from the DKG's true
+                joint secret via a test-only reconstruction (summing
+                every party's real `x^(j)`, something only the test
+                orchestrator -- not any protocol participant -- ever
+                does, exactly mirroring how `test_v3s.c` already
+                validates its own correctness this way) purely so `ek`
+                is internally consistent enough to run the real,
+                unmodified `threshold_round0/1/2`/`Combine` against the
+                DKG-issued shares. Plus a malicious-local-share
+                detection test (tier 1's actual payoff: a party
+                submitting a corrupted local share to even one
+                recipient gets excluded for *every* party via Round
+                3's unanimous-positive rule, not silently corrupting
+                the joint key).
+                - **A second real bug found and fixed, this time in
+                  the test harness, not the protocol code**: the first
+                  run segfaulted (stack overflow) almost instantly.
+                  `dkg_round1_state`/`dkg_public_share`/
+                  `v3s_recipient_data` are each several MB (dominated
+                  by the 2MB `v3s_matrix R`), and `test_dkg.c`
+                  originally declared `TIBE_N`- and
+                  `TIBE_N`x`TIBE_N`-sized *local arrays* of them (tens
+                  of MB, far past the default 8MB stack). Fixed two
+                  ways: (a) every such array in `test_dkg.c` is now
+                  heap-allocated via `malloc`/`free`, not a local
+                  array; (b) a genuine design improvement, not just a
+                  test workaround -- `dkg_public_share` no longer
+                  stores `R` at all (removed from `dkg.h`), since `R`
+                  is fully determined by the 32-byte Merkle root via
+                  `v3s_matrix_derive` -- storing or transmitting a 2MB
+                  matrix that's cheaply re-derivable from 32 bytes was
+                  pure waste, and would have hit a real bandwidth cost
+                  in the eventual Docker wiring too, not just this
+                  test's stack. `dkg_round2` now re-derives `R` locally
+                  from each dealer's `root` instead.
+                - **All tests pass**, measured: `test_dkg` (both
+                  sub-tests: the full honest DKG-then-decapsulation
+                  cycle, dominated by the *existing* threshold
+                  protocol's own established cost, plus the malicious-
+                  dealer-exclusion run) takes **~27m17s** wall clock.
           6. [ ] Docker wiring (`docker-compose.tibe.yml` and friends):
                 real architectural change -- no single `tibe_dealer`
                 process anymore, replaced by an `N`-party joint-setup
                 round. Deferred until 1-5 above are validated
                 standalone; flagged now so it isn't a surprise later.
-        - Design/implementation of tier 1 is in progress -- parameter
-          derivation, the Merkle tree, and V3S itself (checklist items
-          1-3) are done and validated; items 4-6 (this project's own
-          3-round tier-1 DKG protocol design -- not "K1-K4," see item
-          4's correction -- its own tests, and Docker wiring) are the
-          concrete next steps, in order.
+        - **Items 1-5 are done and validated**: parameter derivation,
+          the Merkle tree, V3S, this project's own 3-round tier-1 DKG
+          protocol (`dkg.c`/`.h` -- not "K1-K4," see item 4's
+          correction), and its test suite (`test/test_dkg.c`, ~27m17s,
+          all passing). **Item 6 (Docker wiring) remains**, and per
+          item 4's own correction, a fully dealer-free `tibe_dealer`
+          replacement also still needs `a0`/`d0`'s own distributed
+          generation plus the `b0`-reveal round -- neither built yet,
+          both flagged honestly above, not silently assumed solved by
+          `(s_a,e_a)`'s DKG alone. `(s_a,e_a)`'s DKG itself is a real,
+          complete, tested, and load-bearing piece of work regardless
+          of when (or whether) the remaining pieces get built.
   5. [ ] **8e -- comparison work.** The systematic, empirical
         side-by-side data-gathering against `src/kyber/threshold_decaps`
         (correctness rates, timing/ciphertext-size overhead) that the
