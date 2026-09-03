@@ -14,6 +14,7 @@ src/tibe/test/test_identity
 src/tibe/test/test_threshold
 src/tibe/test/test_tkem
 src/tibe/test/test_merkle
+src/tibe/test/test_v3s
 
 # Archived duplicate of shamir-docker/ (kept as backup, not tracked)
 shamir-docker.tar.gz

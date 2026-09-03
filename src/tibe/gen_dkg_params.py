@@ -91,6 +91,43 @@ def eta_eps_Z(eps_log2=-160):
     return math.sqrt(math.log(2 + 2 / eps) / math.pi)
 
 
+_GAUSS_CONV_BASE_SIGMA = 16.0  # = GAUSS_CONV_BASE_SIGMA in gauss.c
+_GAUSS_CONV_MARGIN = math.sqrt(2) * 6.0  # = GAUSS_CONV_MARGIN in gauss.c
+
+
+def gauss_achieved_sigma(sigma_target):
+    """Independent Python replica of gauss.c's gauss_build_schedule --
+    deliberately a *separate* implementation (not calling into the C
+    code), matching this project's existing convention of
+    cross-checking derivations two ways (e.g. gen_params.py's own
+    from-scratch primality/sqrt routines vs. `openssl prime`).
+
+    Found empirically (running test_v3s.c, see BCHK_TODO.md Phase 8d)
+    that gauss.c's schedule builder, while correct (never *undershoots*
+    the requested width -- the property its own convolution-theorem
+    precondition actually guarantees), can overshoot substantially at
+    some target widths: whenever the schedule's final "fine-tuning"
+    step needs a small integer k (its ceil()-rounding is then a large
+    *relative* change), not just the ~1-2% overshoot Phase 8b's own
+    two original targets (TIBE_SIGMA_PRIME, TIBE_SIGMA_P) happened to
+    see. This function computes the true achieved value so downstream
+    derivations (e.g. TIBE_DKG_B_ACCEPT below) are based on reality,
+    not the naive requested sigma."""
+    s = _GAUSS_CONV_BASE_SIGMA
+    levels = 0
+    while s < sigma_target and levels < 30:
+        k_max = math.floor(s / _GAUSS_CONV_MARGIN)
+        if k_max < 1:
+            k_max = 1
+        k_want = math.ceil(sigma_target / s)
+        k = min(k_want, k_max)
+        if k < 1:
+            k = 1
+        s = s * math.sqrt(k * k + 1.0)
+        levels += 1
+    return s
+
+
 def main():
     q = int(TIBE_Q_HEX, 16)
     secret_dim = 2 * TIBE_D  # (s_a^(i), e_a^(i)) flattened: 2 ring elements * D coeffs
@@ -149,9 +186,22 @@ def main():
     Rx_norm = math.sqrt(R_rows * Rx_coord_var)
     print(f"Expected ||R*x||_2 (honest x) ~= {Rx_norm:.2f}")
 
-    sigma_y = 16384.0
-    y_norm = sigma_y * math.sqrt(R_rows)
-    print(f"sigma_y = {sigma_y}, expected ||y||_2 = sigma_y*sqrt({R_rows}) ~= {y_norm:.2f}  "
+    sigma_y_requested = 16384.0
+    sigma_y_achieved = gauss_achieved_sigma(sigma_y_requested)
+    print(f"sigma_y (requested, passed to gauss_sample_coeff) = {sigma_y_requested}")
+    print(f"sigma_y (ACTUALLY ACHIEVED, per gauss.c's convolution schedule -- see")
+    print(f"  gauss_achieved_sigma()'s docstring) ~= {sigma_y_achieved:.2f}  "
+          f"({sigma_y_achieved / sigma_y_requested:.4f}x the requested value)")
+    print(f"  This is a real, previously-uncharacterized-at-this-target overshoot in 8b's")
+    print(f"  schedule builder -- it lands within ~1-2% for the two widths Phase 8b originally")
+    print(f"  validated (TIBE_SIGMA_PRIME, TIBE_SIGMA_P) but overshoots substantially more here,")
+    print(f"  because the final fine-tuning step happens to need a small integer k, where")
+    print(f"  ceil()-rounding is a large *relative* change. Not a security problem (more")
+    print(f"  blinding noise is conservative), but the derivation below MUST use the achieved")
+    print(f"  value, not the requested one, or B' would be derived too tight and reject honest")
+    print(f"  shares -- confirmed the hard way, see BCHK_TODO.md Phase 8d.")
+    y_norm = sigma_y_achieved * math.sqrt(R_rows)
+    print(f"Expected ||y||_2 = sigma_y_achieved*sqrt({R_rows}) ~= {y_norm:.2f}  "
           f"({y_norm / Rx_norm:.1f}x ||R*x||_2 -- y dominates, blinding x's contribution)")
 
     honest_v_norm = math.sqrt(y_norm ** 2 + Rx_norm ** 2)  # combined via quadrature
@@ -171,8 +221,8 @@ def main():
     print(f"  TIBE_DKG_SIGMA_A_JOINT ~= {sigma_a_joint:.4f}  (documentation only, not a sampled width)")
     print(f"  TIBE_DKG_R_ROWS = {R_rows}")
     print(f"  TIBE_DKG_R_COLS = {R_cols}")
-    print(f"  TIBE_DKG_SIGMA_Y = {sigma_y}")
-    print(f"  TIBE_DKG_B_ACCEPT = {B_accept:.0f}")
+    print(f"  TIBE_DKG_SIGMA_Y = {sigma_y_requested}  (requested; actually achieves ~{sigma_y_achieved:.0f})")
+    print(f"  TIBE_DKG_B_ACCEPT = {B_accept:.0f}  (derived from the ACHIEVED sigma_y, not the requested one)")
     print(f"  TIBE_DKG_B_REJECT = {b_reject:.0f}  (documentation only -- soundness argument, not directly coded)")
 
 

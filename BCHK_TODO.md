@@ -550,24 +550,68 @@ ML-KEM.
           path already validated for `TIBE_SIGMA_PRIME`/`TIBE_SIGMA_P`).
         - **Remaining implementation checklist** (tracked here so this
           survives a context/session break):
-          1. [ ] Merkle tree (`merkle.c`/`.h`, new): SHAKE-256-based,
-                leaves = `hash([[x]]_i, [[y]]_i, r_i)`, co-path proofs
-                -- standard, no open design questions left.
-          2. [ ] `v3s.c`/`.h`: `V3S.Share`/`V3S.Verify`/
+          1. [x] Merkle tree (`merkle.c`/`.h`): SHAKE-256-based,
+                leaf/internal-node domain separation (a single 0x01
+                prefix byte on internal nodes, avoiding the classic
+                second-preimage pitfall), deterministic padding to the
+                next power of two for `TIBE_N=10`. `test/test_merkle.c`
+                validates every real leaf's proof, tampering with any
+                of (leaf, index, root, a sibling) all correctly fail,
+                at `n` in {1,2,3,10,16,17}. All pass.
+          2. [x] `v3s.c`/`.h`: `V3S.Share`/`V3S.Verify`/
                 `V3S.Reconstruct` (Figure 4, Algorithms 1-3 --
                 `RobustReconstruct`/Algorithm 4 is tier 2, **not**
-                implemented, per the tier-1 decision above), built on
-                `threshold.c`'s existing Shamir-sharing machinery
-                generalized to the flattened `2*TIBE_D`-dimension
-                secret, plus the ternary `H_R` hash-to-matrix (simple:
-                2 random bits -> `{0,0,+1,-1}` per entry, matching the
-                1/2,1/4,1/4 distribution exactly).
-          3. [ ] Toy-ring symbolic validation of `V3S.Share`/`Verify`'s
-                algebra *before* real BIGNUM code (matching Phase 3/5's
-                discipline) -- particularly the linearity claim
-                `R*[[x]]+[[y]]` is itself a valid `T`-sharing of
-                `R*x+y`, and the soundness/honest-execution norm checks
-                at this project's concrete numbers above.
+                implemented, per the tier-1 decision above), hardcoded
+                to this project's one actual use (dimensions from
+                `dkg_params.h`) rather than built generic, matching
+                this project's practice of not engineering beyond
+                what's needed. Its own small Shamir-share-a-scalar
+                helper (mirroring `threshold.c`'s
+                `shamir_share_ring_elem`, kept file-local per this
+                project's per-file-owns-its-own-primitives convention,
+                not exposed/shared) plus a generalized
+                `lagrange_coeff_at` (evaluating the interpolated
+                polynomial at an arbitrary point, not just 0 --
+                `threshold.c`'s own `lagrange_coeff_at_zero` doesn't
+                generalize, needed for Algorithm 3's step-3 consistency
+                check against extra shares beyond the first `T`).
+          3. [x] **Real bug found and fixed, not just "toy-ring
+                validated then trusted"**: `test_v3s.c` (run at this
+                project's actual dimensions directly -- no toy/reduced
+                version needed here, since V3S's hot path is cheap
+                conditional BIGNUM mod-add/sub, not O(d^2) `ring_mul`,
+                so iteration is already fast) initially showed *every*
+                honest party's own share failing `V3S.Verify`, while
+                an oversized-secret test correctly got rejected --
+                isolated via temporary debug instrumentation to the
+                shortness check specifically. Root cause: `gauss.c`'s
+                8b convolution schedule builder does not always land
+                precisely on its requested width (it never
+                *undershoots*, the only property its own theorem
+                guarantees, but can overshoot substantially) --
+                `TIBE_DKG_SIGMA_Y=16384`'s schedule actually achieves
+                `~24,489` (`~1.49x`), not `16384`, because its final
+                fine-tuning step happened to need a small integer
+                combination coefficient, where `ceil()`-rounding is a
+                large *relative* change -- worse than the `~1-2%`
+                overshoot Phase 8b's own two original targets
+                (`TIBE_SIGMA_PRIME`, `TIBE_SIGMA_P`) happened to see,
+                which is why this went uncaught until now. Not a
+                security problem (more blinding noise is conservative)
+                but `TIBE_DKG_B_ACCEPT` had been derived from the wrong
+                (requested, not achieved) width, silently rejecting
+                every honest submission. Fixed by adding
+                `gauss_achieved_sigma()` to `gen_dkg_params.py` -- an
+                independent Python replica of `gauss.c`'s schedule
+                builder (matching this project's existing
+                two-independent-implementations convention, e.g.
+                `gen_params.py`'s own from-scratch primality/sqrt code
+                vs. `openssl prime`) -- and re-deriving
+                `TIBE_DKG_B_ACCEPT` (342000 -> 510000) from the true
+                achieved width. All of `test_v3s.c` (honest
+                verify+reconstruct at `T` and at all `N` shares,
+                tampered-share/proof/nonce rejection, oversized-secret
+                rejection) now passes, ~23s.
           4. [ ] `dkg.c`/`.h`: the `K1`-`K4` protocol (Section 2.2, "From
                 V3S to Distributed Secret Sharing") adapted onto this
                 project's conventions -- round-based state machine
@@ -591,8 +635,10 @@ ML-KEM.
                 round. Deferred until 1-5 above are validated
                 standalone; flagged now so it isn't a surprise later.
         - Design/implementation of tier 1 is in progress -- parameter
-          derivation (item above the checklist) is done; the checklist
-          items above are the concrete next steps, in order.
+          derivation, the Merkle tree, and V3S itself (checklist items
+          1-3) are done and validated; items 4-6 (the `K1`-`K4` DKG
+          protocol proper, its own tests, and Docker wiring) are the
+          concrete next steps, in order.
   5. [ ] **8e -- comparison work.** The systematic, empirical
         side-by-side data-gathering against `src/kyber/threshold_decaps`
         (correctness rates, timing/ciphertext-size overhead) that the

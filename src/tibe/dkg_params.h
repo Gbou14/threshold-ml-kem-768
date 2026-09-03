@@ -49,26 +49,42 @@
 #define TIBE_DKG_R_ROWS 256  /* = 2*kappa, kappa=128 */
 #define TIBE_DKG_R_COLS 8192 /* = 2*TIBE_D */
 
-/* Width of the ephemeral Gaussian blinding vector y in
- * D_{TIBE_DKG_SIGMA_Y}^{TIBE_DKG_R_ROWS} (over Z directly, not the
- * ring -- 256 independent integer coefficients). Chosen (see
- * gen_dkg_params.py) so ||y|| dominates ||R*x|| for honest x
- * (~16x), and so the honest-accept region and Lemma 2's malicious-
- * reject floor are cleanly separated (see TIBE_DKG_B_ACCEPT below).
- * A clean power of two (2^14), matching this project's convention
- * elsewhere for widths not directly forced by a correctness
- * equation. Exceeds GAUSS_DIRECT_MAX_SIGMA, so sampling y also
- * reuses gauss.c's existing convolution machinery unmodified -- no
- * new sampler code needed for either x or y. */
+/* Width *requested* from gauss_sample_coeff for the ephemeral
+ * Gaussian blinding vector y (over Z directly, not the ring -- 256
+ * independent integer coefficients). A clean power of two (2^14),
+ * matching this project's convention elsewhere for widths not
+ * directly forced by a correctness equation. Exceeds
+ * GAUSS_DIRECT_MAX_SIGMA, so sampling y goes through gauss.c's
+ * existing convolution machinery unmodified -- no new sampler code
+ * needed for either x or y.
+ *
+ * IMPORTANT, found empirically (test_v3s.c, see BCHK_TODO.md Phase
+ * 8d): gauss.c's convolution schedule does not always land precisely
+ * on its requested width -- it never *undershoots* (the only
+ * property its own theorem guarantees), but at this particular target
+ * it overshoots to an *actually achieved* width of ~24,489, not
+ * 16,384 (~1.49x), because the schedule's final fine-tuning step
+ * happens to need a small integer combination coefficient, where
+ * ceil()-rounding is a large relative change -- worse than the ~1-2%
+ * overshoot Phase 8b's own two original targets (TIBE_SIGMA_PRIME,
+ * TIBE_SIGMA_P) happened to see. Not a security problem (more
+ * blinding noise is conservative), but TIBE_DKG_B_ACCEPT below is
+ * derived from the ACHIEVED ~24,489 width (gen_dkg_params.py's
+ * gauss_achieved_sigma(), an independent Python replica of
+ * gauss.c's schedule builder), not this requested value -- getting
+ * that wrong the first time caused every honest V3S.Verify call to
+ * fail (caught by test_v3s.c, not assumed correct). */
 #define TIBE_DKG_SIGMA_Y 16384.0
 
 /* Accept threshold on ||R*x+y|| (V3S.Verify's norm check): honest
- * submissions land around ~262,656 (1.3x tail margin -> rounded up
- * to 342,000, see gen_dkg_params.py); Lemma 2 guarantees a submission
- * with ||x|| >= TIBE_DKG_B_REJECT produces ||R*x+y|| >=
- * 2,549,510 with overwhelming probability -- a ~7.45x margin between
- * the two, confirmed numerically, not eyeballed. */
-#define TIBE_DKG_B_ACCEPT 342000.0
+ * submissions land around ~392,165 (using sigma_y's ACTUAL achieved
+ * width ~24,489, not the requested 16,384 -- see TIBE_DKG_SIGMA_Y's
+ * comment), 1.3x tail margin -> rounded up to 510,000, see
+ * gen_dkg_params.py. Lemma 2 guarantees a submission with
+ * ||x|| >= TIBE_DKG_B_REJECT produces ||R*x+y|| >= 2,549,510 with
+ * overwhelming probability -- a ~5.00x margin between the two,
+ * confirmed numerically, not eyeballed. */
+#define TIBE_DKG_B_ACCEPT 510000.0
 
 /* Documentation only, not directly coded anywhere: the norm above
  * which Lemma 2 guarantees rejection. ~493x the expected honest norm
