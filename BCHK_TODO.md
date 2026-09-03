@@ -1093,3 +1093,39 @@ starts from the precise trust-model claim above rather than the looser
   vs below-threshold behavior once Phase 5 lands) rather than a
   byte-exact diff -- the same fallback this project already used for
   `src/kyber/threshold.c` and `threshold_decaps`.
+
+### Session handoff (2026-09-03, end of session)
+
+**Phase 8d is done.** The fully dealer-free BCHK+ system (DKG for
+`(s_a,e_a)` + `a0`/`d0`/`b0`'s own distributed generation, no party
+ever forming the plaintext key) is implemented, unit-tested
+(`test_dkg`, `test_dkg_pubkey`), wired into
+`docker-compose.tibe.yml`, and **confirmed with a live multi-container
+run**: all 10 shareholders + `tibe_dealer` completed setup, then
+`tibe_coordinator` ran a real threshold decapsulation with an exact
+AES-256-GCM plaintext round trip (`data/tibe_results.csv`:
+`tkem_success=1, aes_success=1`). Two real bugs the live run itself
+surfaced were found and fixed (stale cached Docker images from `up -d`
+not rebuilding; `tibe_coordinator`'s per-round HTTP timeout, 120s, too
+tight for `round0`'s real ~500s/5-party cost) -- see item 6 under
+Phase 8d above for the full writeup. Committed as `339bf75` ("tibe:
+Wire the fully dealer-free system into Docker Compose"), pushed to
+`origin/bchk-redesign`.
+
+**Next up, in order (per the existing Phase 8 gate list above)**:
+- **8e -- comparison work**: empirical side-by-side data against
+  `src/kyber/threshold_decaps` (correctness rates, timing/ciphertext-
+  size overhead) -- feeds the comparison paper (see "Future: paper
+  writeups" below), not the writing itself.
+- **8f -- validate at the paper's actual proven `T=32`**, only once 8e
+  is done. Before any publication claim resting on the security proof
+  (see `src/tibe/README.md`'s `T=5` caveat).
+
+**Longer-term, already decided, not yet started**: once this branch's
+own writeup is in reasonable shape, branch again for the 2026/021
+successor paper (tier-2 V3S/DKG lead noted, not built) -- see "Future:
+paper writeups" below for the full four-candidate framing agreed with
+the project owner.
+
+No other uncommitted work exists on this branch as of this handoff --
+`git status` is clean.
