@@ -11,10 +11,11 @@ SRCS_TKEM := ring.c gauss.c tibe.c wots.c identity.c threshold.c tkem.c
 SRCS_MERKLE := merkle.c
 SRCS_V3S := ring.c gauss.c merkle.c v3s.c
 SRCS_DKG := ring.c gauss.c tibe.c wots.c identity.c threshold.c merkle.c v3s.c dkg.c
+SRCS_DKG_PUBKEY := ring.c gauss.c tibe.c wots.c identity.c threshold.c merkle.c v3s.c dkg.c dkg_pubkey.c
 
 .PHONY: test clean
 
-test: test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity test/test_threshold test/test_tkem test/test_merkle test/test_v3s test/test_dkg
+test: test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity test/test_threshold test/test_tkem test/test_merkle test/test_v3s test/test_dkg test/test_dkg_pubkey
 	./test/test_ring
 	./test/test_gauss
 	./test/test_wots
@@ -25,6 +26,7 @@ test: test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_ide
 	./test/test_merkle
 	./test/test_v3s
 	./test/test_dkg
+	./test/test_dkg_pubkey
 
 test/test_ring: test/test_ring.c $(SRCS) $(wildcard *.h)
 	$(CC) $(CFLAGS) -o $@ test/test_ring.c $(SRCS) $(LDLIBS)
@@ -56,5 +58,8 @@ test/test_v3s: test/test_v3s.c $(SRCS_V3S) $(wildcard *.h)
 test/test_dkg: test/test_dkg.c $(SRCS_DKG) $(wildcard *.h)
 	$(CC) $(CFLAGS) -o $@ test/test_dkg.c $(SRCS_DKG) $(LDLIBS)
 
+test/test_dkg_pubkey: test/test_dkg_pubkey.c $(SRCS_DKG_PUBKEY) $(wildcard *.h)
+	$(CC) $(CFLAGS) -o $@ test/test_dkg_pubkey.c $(SRCS_DKG_PUBKEY) $(LDLIBS)
+
 clean:
-	rm -f test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity test/test_threshold test/test_tkem test/test_merkle test/test_v3s test/test_dkg *.o
+	rm -f test/test_ring test/test_gauss test/test_wots test/test_tibe test/test_identity test/test_threshold test/test_tkem test/test_merkle test/test_v3s test/test_dkg test/test_dkg_pubkey *.o

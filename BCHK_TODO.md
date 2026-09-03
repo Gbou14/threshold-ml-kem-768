@@ -760,20 +760,104 @@ ML-KEM.
           6. [ ] Docker wiring (`docker-compose.tibe.yml` and friends):
                 real architectural change -- no single `tibe_dealer`
                 process anymore, replaced by an `N`-party joint-setup
-                round. Deferred until 1-5 above are validated
-                standalone; flagged now so it isn't a surprise later.
-        - **Items 1-5 are done and validated**: parameter derivation,
-          the Merkle tree, V3S, this project's own 3-round tier-1 DKG
-          protocol (`dkg.c`/`.h` -- not "K1-K4," see item 4's
-          correction), and its test suite (`test/test_dkg.c`, ~27m17s,
-          all passing). **Item 6 (Docker wiring) remains**, and per
-          item 4's own correction, a fully dealer-free `tibe_dealer`
-          replacement also still needs `a0`/`d0`'s own distributed
-          generation plus the `b0`-reveal round -- neither built yet,
-          both flagged honestly above, not silently assumed solved by
-          `(s_a,e_a)`'s DKG alone. `(s_a,e_a)`'s DKG itself is a real,
-          complete, tested, and load-bearing piece of work regardless
-          of when (or whether) the remaining pieces get built.
+                round. **Reordered, 2026-09-03, per the project owner**:
+                item 7 below (finishing the fully dealer-free system)
+                now comes *before* this, so Docker gets wired once for
+                the complete design rather than twice.
+          7. [x] **`a0`/`d0`/`b0`: completing the fully dealer-free
+                system.** New `dkg_pubkey.c`/`.h`, layered on top of
+                `dkg.c` (reuses each party's already-sampled local `x`
+                from `dkg_round1_state` for `b0` -- no new secret
+                sampling).
+                - **`a0`/`d0`**: need to be genuinely fresh and jointly
+                  unbiased *per keygen* (the security proof needs `a0`
+                  unpredictable in advance, the same reason Kyber-style
+                  schemes derive their own public matrix from fresh
+                  randomness rather than a fixed constant) -- standard
+                  commit-then-reveal coin-flipping: each party commits
+                  to a random `(a0_i,d0_i)` candidate, then reveals;
+                  `a0 := sum(a0_i)`, `d0 := sum(d0_i)` over every
+                  party whose reveal matches its commitment (sum of
+                  uniforms is uniform, unbiased as long as one
+                  contributor is honest -- the standard coin-flipping
+                  guarantee).
+                - **`b0` -- the real design question, not just
+                  plumbing**: `b0 = a0*s_a+e_a-beta` is a direct
+                  function of the DKG'd secret. Naively broadcasting
+                  each party's own `b0_i = a0*s_a^(i)+e_a^(i)` would
+                  publish `TIBE_N` *separate* small-secret samples
+                  under one shared `a0` -- not obviously covered by
+                  the base paper's own hardness assumptions, and
+                  deliberately **not** assumed fine without checking.
+                  Instead reuses the *exact* pairwise-cancelling
+                  masking technique `threshold.c`'s own decapsulation
+                  protocol already uses and has already validated: for
+                  each pair `i<j`, `i` sends `j` one fresh random mask
+                  over their already-existing private per-pair channel
+                  (piggybacking on `dkg.c` Round 1's channel, not a
+                  new one); `i` adds it, `j` subtracts it, so summing
+                  every valid party's masked contribution cancels the
+                  masks exactly and reveals only the aggregate `b0` --
+                  precisely what the original single-dealer scheme
+                  already published, nothing new exposed. A
+                  deliberately simpler, self-contained, one-time mask
+                  (not a reuse of `threshold_share.pairwise_seed`,
+                  whose own dealer-free establishment is a separate,
+                  smaller open question, not solved here either).
+                - **A third real bug found and fixed** (this project's
+                  pattern of catching real bugs via actually running
+                  things at scale continues to pay off): the test
+                  segfaulted again, this time not from a `TIBE_N`-sized
+                  array but from the *sum* of many medium-sized locals
+                  (`ek`/`msk`/throwaway copies, `shares[TIBE_N]`,
+                  `r0states[TIBE_T]`, `contribs[TIBE_T]`, `ct`, etc.)
+                  in one already-large test function -- collectively
+                  ~5.8MB, which combined with `dkg_round2`'s own 2MB
+                  local `v3s_matrix` (called from deep inside that same
+                  function) exceeded the 8MB stack. Root-caused via
+                  `gdb -batch -ex run -ex bt` (register dump initially,
+                  then a `-g` debug rebuild for a symbolized trace)
+                  rather than guessed at. Fixed by heap-allocating
+                  every such structure in the test, not just the
+                  `TIBE_N`-indexed arrays from the first segfault (8d
+                  item 5) -- the lesson generalized: *any* accumulation
+                  of this module's structures (dominated by V3S's 2MB
+                  challenge matrix or by many `ring_elem`s at 32KB
+                  each) needs heap allocation once a test's own frame
+                  gets this deep, not just literal `TIBE_N`-sized
+                  arrays.
+                - **Crown-jewel result, `test/test_dkg_pubkey.c`, all
+                  passing (~28m10s)**: a complete run of `dkg.c` +
+                  `dkg_pubkey.c` decapsulates correctly through the
+                  real, unmodified threshold protocol **without any
+                  test-only reconstruction of `(s_a,e_a)` anywhere** --
+                  unlike `test_dkg.c` (Phase 8d item 5), which had to
+                  reconstruct the joint secret directly just to build a
+                  consistent `ek`, since `b0` wasn't distributed yet.
+                  That absence is itself the thing being tested: this
+                  is the first point in the whole project where a
+                  complete keypair is generated with the property the
+                  project owner asked for directly -- no party, ever,
+                  at any point in the protocol, forms the plaintext
+                  key.
+                - **Still explicitly out of scope, flagged not
+                  silently assumed away**: `threshold_share.pairwise_
+                  seed`'s own dealer-free establishment (used only by
+                  decapsulation itself, not by this setup layer); `A1`/
+                  `A2`/`G`/`r`, independent of the secret and not
+                  security-critical to keep unbiased the way `a0` is,
+                  still need *some* agreed generation mechanism for a
+                  real deployment (a simple public verifiable-
+                  randomness step would likely suffice, not designed
+                  here).
+        - **Items 1-5 and 7 are done and validated**: parameter
+          derivation, the Merkle tree, V3S, this project's own 3-round
+          tier-1 DKG protocol for `(s_a,e_a)`, its test suite, and now
+          `a0`/`d0`/`b0`'s own distributed generation completing a
+          genuinely, fully dealer-free keygen -- confirmed end to end,
+          not just each piece in isolation. **Item 6 (Docker wiring)
+          is the only remaining piece**, and can now be built once for
+          the complete design.
   5. [ ] **8e -- comparison work.** The systematic, empirical
         side-by-side data-gathering against `src/kyber/threshold_decaps`
         (correctness rates, timing/ciphertext-size overhead) that the
