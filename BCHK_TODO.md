@@ -346,8 +346,9 @@ ML-KEM.
           `src/tibe/README.md` "Performance" for the full breakdown
           and why the two huge (convolution-built) widths turned out
           cheap in practice despite the naive-looking recursion depth.
-  3. [x] **8c's literature pass -- done; scoping decision now needed
-        before any implementation.** Read eprint 2026/021 ("IND-CCA
+  3. [x] **8c -- resolved: descoped for this branch, tracked as a
+        separate future effort (see decision below).** Read eprint
+        2026/021 ("IND-CCA
         Lattice Threshold KEM under 30 KiB," Boudgoust, del Pino,
         Lapiha, Prest) in full through its core algorithms (~16 pages:
         abstract/contributions, preliminaries, the new TIBE
@@ -413,9 +414,23 @@ ML-KEM.
           different, newer construction, not a bolt-on), and move to
           8d/8e/8f, keeping this project centered on faithfully
           implementing Lapiha-Prest 2025/1958 as originally scoped.
-        - Not yet decided as of this pass -- flagged here rather than
-          picking an approach unilaterally, matching how 8d (DKG) below
-          was already flagged for the same kind of reason.
+        - **Decided with the project owner, 2026-09-03: option (c).**
+          Robustness is descoped from *this* implementation
+          (`bchk-redesign`, the Lapiha-Prest 2025/1958 system) --
+          documented honestly as "requires a substantially different
+          construction, not a bolt-on; see eprint 2026/021" rather than
+          silently dropped. This branch continues to 8d/8e/8f and its
+          own implementation paper (Paper B below) without waiting on
+          2026/021. The 2026/021 construction becomes a **separate,
+          later track**: a new branch off `bchk-redesign` (carrying
+          forward the reusable pieces -- WOTS+, the outer BCHK+ TKEM
+          transform in `tkem.c` (their Fig. 2 is *literally the same
+          transform*, unchanged from 2025/1958), the exact Gaussian
+          sampler from 8b, and the general 3-round-HTTP Docker
+          architecture), started only once this branch's own
+          implementation paper is in a publishable position -- not
+          before, and not blocking it. See "Future: paper writeups"
+          below for how this splits the eventual writeup(s).
   4. [ ] **8d -- distributed key generation (DKG).** Removes the
         trusted-dealer assumption (`Remark 1`, `src/dealer.c`'s Kyber
         role and `src/tibe_dealer.c`'s role alike). **Neither the base
@@ -442,49 +457,93 @@ ML-KEM.
     tied to one specific step above: revisit if BIGNUM's per-multiply
     cost makes 8f (or 8a's repeated full-protocol runs) impractically
     slow.
-  - Once 8a-8f are done, per the project owner: begin the
-    implementation paper (see "Future: paper writeups" below) from
-    that stronger position -- known gaps closed or explicitly scoped,
-    not just Phase 1-7's happy-path validation.
+  - Once 8a, 8b, 8d, 8e, 8f are done (8c is already resolved, by
+    descoping -- see above), per the project owner: begin Paper B (see
+    "Future: paper writeups" below) from that stronger position --
+    known gaps closed or explicitly scoped, not just Phase 1-7's
+    happy-path validation. The 2026/021 track (Paper C) starts only
+    after Paper B reaches that point, on a separate branch, per the
+    2026-09-03 decision above.
 
 ## Future: paper writeups (goal, not yet started)
 
-Two papers, once the implementation is far enough along to have real
-results to report -- confirmed with the project owner as the end goal
-this whole redesign is in service of. **Start of the implementation
-paper is gated on Phase 8a-8f above being done or explicitly scoped
-out**, not on Phase 1-7's happy-path validation alone -- confirmed
-with the project owner (2026-09-01) specifically so the paper starts
-from a position where the known gaps (testing, the Gaussian sampler,
-robustness, DKG) are closed or honestly bounded, not silently absent.
+Up to **four** candidate write-ups, not two -- expanded 2026-09-03 once
+the 2026/021 scoping decision above made clear that a second TIBE
+generation is a real, separate track, not a footnote on the first. Not
+all four are equally strong or equally likely to actually get written;
+noted honestly below rather than oversold. **Confirmed order of
+operations with the project owner (2026-09-03): finish Paper B (this
+branch, `bchk-redesign`, Phase 8d-8f) to a publishable position
+*first* -- it's close. Only then branch off `bchk-redesign` to start
+the 2026/021 track (Paper C), so Paper B's timeline isn't held hostage
+to a substantially larger, separate undertaking.** Start of Paper B is
+still gated on Phase 8d-8f above being done or explicitly scoped out
+(confirmed 2026-09-01), not on Phase 1-7's happy-path validation alone,
+and now explicitly *not* gated on 8c/robustness, which is resolved by
+being descoped for this branch (see 8c above) rather than by being
+implemented.
 
-1. **Implementation paper**: reproducing Lapiha & Prest's BCHK+
-   threshold KEM (eprint 2025/1958) as a from-scratch, real, working
-   system -- the engineering contribution, in the same spirit as this
-   project's own `src/kyber/README.md` (what was built, how it was
-   validated with no public reference to check against, what
-   concrete choices the paper left open and how they were resolved --
-   `BCHK_PAPER_SPEC.md`'s open-questions section and each phase's
-   README notes are the running material for this).
-2. **Comparison paper**: this implementation vs. `src/kyber/threshold_decaps`
-   (the trusted-combiner threshold ML-KEM already built and validated in
-   this repo) -- results-based, once both systems can be measured side
-   by side: correctness rates, timing/ciphertext-size overhead, and
-   the precise trust-model delta written up rigorously. Phase 8e above
-   is the actual data-gathering this needs; this paper's writing is a
-   separate, later step even once 8e's numbers exist. See this
-   file's `src/tibe/README.md` companion, "The actual trust-model delta
-   vs. `src/kyber/threshold_decaps`", for the precise claim to build on:
-   **not** "the new combiner never sees the plaintext" (false in both
-   schemes -- the combiner necessarily reconstructs it in both), but
-   "CCA security no longer depends on the combiner's honesty," because
-   every shareholder independently rejects an invalid ciphertext via a
-   public signature check before doing any partial-decryption work,
-   rather than the validity check happening only after the fact at the
-   combiner.
+1. **Paper A -- Kyber+Shamir threshold ML-KEM-768** (`src/kyber/`,
+   already built and validated: 200/200 live-Docker trials). Real,
+   working, and honestly documents its one trust concession -- but
+   both ingredients (ML-KEM, Shamir sharing) are individually
+   well-known, so its case as a fully *standalone* paper is the
+   weakest of the four. Likelier role: the motivating system inside
+   Paper D, or `src/kyber/README.md`-derived background material
+   folded into Paper B's introduction, rather than a separate
+   submission -- flagged as a possibility, not a commitment.
+2. **Paper B -- BCHK+-2025 implementation paper** (this branch): the
+   strongest, nearest-term candidate. Reproducing Lapiha & Prest's
+   BCHK+ threshold KEM (eprint 2025/1958) as a from-scratch, real,
+   working system with no public reference implementation to check
+   against -- what was built, how it was validated, what concrete
+   choices the paper left open and how they were resolved
+   (`BCHK_PAPER_SPEC.md`'s open-questions section and each phase's
+   README notes are the running material), and, concretely, **two
+   real bugs found in the paper's own algorithm boxes that only
+   surfaced from actually implementing them** (Algorithm 7/8's `z2`
+   sign, Algorithm 5's `y_{i,0}` formula -- see Phase 3 and Phase 5
+   above) -- exactly the kind of finding a first-implementation paper
+   exists to report. Robustness is explicitly out of scope for this
+   paper (see 8c's resolution above); the paper should say so plainly
+   and point to 2026/021 as the identified next step, not stay silent
+   about it.
+3. **Paper C -- BCHK+-2026 implementation paper** (future, separate
+   branch off `bchk-redesign`, started only after Paper B is in a
+   publishable position): implementing eprint 2026/021's redesigned
+   TIBE -- NTRU trapdoor generation (new cryptographic engineering
+   this project hasn't attempted at all yet), the simpler
+   `H_id`-based identity embedding, Vandermonde secret sharing and its
+   per-party linear-identity/norm-bound robustness check, and the
+   ~18x ciphertext-size reduction (~30 KiB vs. Paper B's ~540 KiB at
+   `T=32, Q=2^45`) -- distinct enough technical content (a different
+   trapdoor family, a different secret-sharing primitive, native
+   robustness Paper B's system structurally cannot have) to stand as
+   its own paper, not a revision of Paper B's.
+4. **Paper D -- comparison paper**: results-based, comparing whichever
+   of A/B/C exist at the time it's written (at minimum B vs. A;
+   ideally eventually B vs. C, or all three) -- correctness rates,
+   timing/ciphertext-size overhead, and the precise trust-model delta
+   written up rigorously. Phase 8e above is B-vs-A's actual
+   data-gathering; this paper's writing is a separate, later step even
+   once 8e's numbers exist. See this file's `src/tibe/README.md`
+   companion, "The actual trust-model delta vs.
+   `src/kyber/threshold_decaps`", for the precise claim B-vs-A should
+   build on: **not** "the new combiner never sees the plaintext"
+   (false in both schemes -- the combiner necessarily reconstructs it
+   in both), but "CCA security no longer depends on the combiner's
+   honesty," because every shareholder independently rejects an
+   invalid ciphertext via a public signature check before doing any
+   partial-decryption work, rather than the validity check happening
+   only after the fact at the combiner. A B-vs-C comparison would add
+   a second axis (robustness, ciphertext size, real measured speed --
+   Paper B's runs are currently 20min-57min per cycle on this
+   development machine; Paper C's smaller modulus and 4-vs-10
+   ciphertext ring elements should measurably improve this, worth
+   confirming with real numbers rather than assuming).
 
-Not started -- flagged here so it isn't lost, and so any writeup starts
-from the precise trust-model claim above rather than the looser
+None started -- flagged here so nothing is lost, and so any writeup
+starts from the precise trust-model claim above rather than the looser
 "combiner never holds the key" phrasing that doesn't survive scrutiny.
 
 ## Notes for future sessions
