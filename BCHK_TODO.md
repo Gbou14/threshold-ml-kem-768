@@ -346,17 +346,76 @@ ML-KEM.
           `src/tibe/README.md` "Performance" for the full breakdown
           and why the two huge (convolution-built) widths turned out
           cheap in practice despite the naive-looking recursion depth.
-  3. [ ] **8c -- robustness.** Misbehaving-shareholder detection is
-        already real (the commit-then-reveal check, once 8a confirms
-        it end to end); *recovery* (continuing correctly despite a
-        misbehaving shareholder, rather than the whole `act` set's
-        attempt simply failing) is not, matching the base paper
-        itself (Table 1: "Robust: No"). The 2026 follow-up (eprint
-        2026/021) reportedly adds this via Vandermonde secret sharing
-        at a reduced query bound -- **not read yet**; this needs its
-        own literature pass (matching the rigor Phase 0 gave the base
-        paper) before any implementation work, not an assumption that
-        it's a drop-in change to `threshold_share`'s Shamir-sharing.
+  3. [x] **8c's literature pass -- done; scoping decision now needed
+        before any implementation.** Read eprint 2026/021 ("IND-CCA
+        Lattice Threshold KEM under 30 KiB," Boudgoust, del Pino,
+        Lapiha, Prest) in full through its core algorithms (~16 pages:
+        abstract/contributions, preliminaries, the new TIBE
+        construction sketch, `VandShare`/`VandRecover`, and the
+        correctness/robustness algebra), matching the rigor Phase 0
+        gave the base paper -- confirmed via `WebFetch`+`Read` (page
+        images, same technique used for Micciancio-Walter in 8b), not
+        assumed from the abstract alone. **Finding: this is not a
+        robustness patch on the TIBE this project already built.** It
+        is a near-total *second-generation* TIBE redesign, bundling
+        several independent changes:
+        - A different, simpler identity embedding
+          (`F_id = [A0 | H_id(id)]`, ROHIBE-based) replacing this
+          project's ABB/CHKP-style `F_id = [A0 | A1+E(id)*B | A2]` --
+          drops the `A2` matrix (and this project's `identity.c`
+          ring-splitting embedding map `E` along with it) entirely.
+        - NTRU trapdoors (`A = [1 a b]`) instead of this project's
+          module-NTRU-style `A0` trapdoor.
+        - A different modulus-scaling regime
+          (`q = Theta(d^{3/2}*sqrt(QT))` vs. this project's
+          `q = Theta(d^5*sqrt(QT))`-class parameters) and ciphertexts
+          with **4** ring elements instead of this project's 10 (an
+          18x reported ciphertext-size reduction, ~30 KiB vs. 540 KiB
+          at `T=32, Q=2^45`).
+        - Robustness itself (`Q=2^25` for the robust variant) comes
+          from replacing Shamir secret sharing with **Vandermonde
+          secret sharing (VSS)**, a lattice-friendly adaptation
+          (Desmedt et al., cited as [9]) of a *recursive, binary-tree*
+          sharing scheme (`VandShare`/`VandRecover`, their Algorithms
+          2-3) -- structurally different from this project's flat
+          Shamir + Lagrange-interpolation (`threshold.c`). VSS shares
+          are short (bounded-norm) by construction, and each party's
+          round response can be checked via **one local linear
+          identity + a norm bound** (their Lemma 12, Eq. 7-11) against
+          their *specific* new embedding's algebra -- not this
+          project's commit-then-reveal-then-verify 3-round protocol.
+          The paper does not show (and we have not independently
+          derived) that this per-party linear-identity check
+          generalizes to this project's own `F_vk`/`z`/`w_i` algebra;
+          the paper builds it directly into their new construction's
+          own equations.
+        - Net: VSS (the sharing/verification primitive) is plausibly
+          adaptable to a different TIBE in principle, but robustness as
+          *this paper demonstrates it* is inseparable from adopting
+          their whole new embedding/trapdoor/parameter redesign, not a
+          drop-in swap inside `threshold_share`. Confirms the caution
+          already in this TODO ("not an assumption that it's a
+          drop-in change") was warranted.
+        - **Scoping decision needed from the project owner** before any
+          code: (a) attempt an original adaptation of VSS-style
+          per-party verification onto this project's *existing*
+          construction (real, undemonstrated derivation work, own risk
+          of algebra bugs -- same category of effort as Phase 5's two
+          bugs, but for a technique this paper doesn't hand us
+          pre-derived); (b) build the *full* 2026/021 construction as a
+          second, parallel TIBE module (comparable scope to Phases
+          1-8b again, but yields smaller ciphertexts *and* native
+          robustness, and is arguably a different paper's construction
+          -- affects what "the implementation paper" is actually about,
+          see "Future: paper writeups" below); or (c) descope
+          robustness for this project, document why honestly (the real
+          reason: robustness in the literature is currently tied to a
+          different, newer construction, not a bolt-on), and move to
+          8d/8e/8f, keeping this project centered on faithfully
+          implementing Lapiha-Prest 2025/1958 as originally scoped.
+        - Not yet decided as of this pass -- flagged here rather than
+          picking an approach unilaterally, matching how 8d (DKG) below
+          was already flagged for the same kind of reason.
   4. [ ] **8d -- distributed key generation (DKG).** Removes the
         trusted-dealer assumption (`Remark 1`, `src/dealer.c`'s Kyber
         role and `src/tibe_dealer.c`'s role alike). **Neither the base
