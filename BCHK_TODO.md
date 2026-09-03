@@ -612,13 +612,67 @@ ML-KEM.
                 verify+reconstruct at `T` and at all `N` shares,
                 tampered-share/proof/nonce rejection, oversized-secret
                 rejection) now passes, ~23s.
-          4. [ ] `dkg.c`/`.h`: the `K1`-`K4` protocol (Section 2.2, "From
-                V3S to Distributed Secret Sharing") adapted onto this
-                project's conventions -- round-based state machine
-                matching `threshold_round0/1/2`'s existing shape; `d0`/
-                `a0`/`A0` derivation stays a separate, much simpler
-                question (see "already effectively public" note above)
-                from `(s_a,e_a)`'s DKG, not conflated with it.
+          4. [ ] **Correction before implementing, 2026-09-03**: this
+                checklist previously described item 4 as "the `K1`-`K4`
+                protocol (Section 2.2)" -- **wrong**, caught on
+                re-reading before writing any code. Section 2.2's V1-V4
+                blueprint and Pelican's own `K1`-`K4` (Figure 5) are
+                *both* explicitly built on **Robust V3S** (tier 2: "our
+                protocol is robust and secure as long as `T<=N/3` for
+                the final reconstruction," page 8) -- the *complaint-
+                broadcast-then-review* round structure is specifically
+                tier 2's, not tier 1's. The actually-tier-1-appropriate
+                primitive is Section 4.3's simpler **"VSSS protocol with
+                detection of malicious behavior"** (no complaint-review
+                round, no SKE-encrypted broadcast machinery: dealer
+                shares once, every party independently
+                `V3S.Verify`s and broadcasts its own 1-bit verdict, a
+                sharing is accepted only if *every* party's verdict was
+                positive -- "in case at least one of the parties is
+                dishonest... the protocol may abort with no possibility
+                of recovery," page 22, which is exactly tier 1's
+                documented "detect-not-recover" semantics elsewhere in
+                this project). The paper describes this only for a
+                *single* dealer sharing *one* secret -- it does not
+                itself give a "DKG from tier-1 VSSS" blueprint (only
+                from Robust V3S). `dkg.c`'s 3-round design below is
+                therefore **this project's own adaptation**, generalizing
+                Section 4.3's single-dealer consensus rule to the
+                `TIBE_N`-dealer aggregation case, not a transcription of
+                anything in the paper -- flagged honestly, not
+                presented as "the paper says to do this."
+                - **Round 1** (each party `i`, as dealer for its own
+                  `x^(i)`): `v3s_share`; broadcast the public
+                  `(root_i, v_shares_i, R_i)`; send each recipient `j`
+                  its private `v3s_recipient_data` directly (this
+                  project's existing per-recipient-HTTP-POST channel
+                  model, matching how `tibe_dealer.c` already
+                  distributes shares -- no new SKE-encryption machinery
+                  needed, since we're not relaying through a shared
+                  broadcast channel the way the paper's abstract model
+                  assumes).
+                - **Round 2** (each party `i`): for every dealer `j`
+                  (`1..TIBE_N`, including itself), `v3s_verify` the
+                  private data received against dealer `j`'s public
+                  data; broadcast the resulting length-`TIBE_N` verdict
+                  vector `(b_{i,1},...,b_{i,TIBE_N})`.
+                - **Round 3** (each party `i`): dealer `j` is
+                  *globally valid* iff `b_{k,j}=1` for **every** `k`
+                  (every party's own verification of `j` succeeded --
+                  requires all `TIBE_N` verdict vectors to have actually
+                  arrived and be seen identically by everyone, an
+                  honest-broadcast assumption this project's HTTP
+                  transport will need to approximate, flagged now, not
+                  silently assumed solved); aggregate
+                  `[[x]]_i := sum_{j in valid} [[x_j]]_i` -- party `i`'s
+                  final `(T,N)`-Shamir share of the joint
+                  `x = sum_{j in valid} x^(j) = (s_a, e_a)`, ready to be
+                  used by the *existing*, unmodified
+                  `threshold_round0/1/2`/`Combine` exactly like a
+                  `threshold_setup`-issued share. `d0`/`a0`/`A0`
+                  derivation stays a separate, much simpler question
+                  (see "already effectively public" note above), not
+                  conflated with this.
           5. [ ] `test/test_dkg.c`: full `N`-party DKG run producing a
                 real `(T,N)`-Shamir sharing of a genuinely
                 nobody-ever-saw-the-whole-thing joint `(s_a,e_a)`, wired
@@ -636,8 +690,9 @@ ML-KEM.
                 standalone; flagged now so it isn't a surprise later.
         - Design/implementation of tier 1 is in progress -- parameter
           derivation, the Merkle tree, and V3S itself (checklist items
-          1-3) are done and validated; items 4-6 (the `K1`-`K4` DKG
-          protocol proper, its own tests, and Docker wiring) are the
+          1-3) are done and validated; items 4-6 (this project's own
+          3-round tier-1 DKG protocol design -- not "K1-K4," see item
+          4's correction -- its own tests, and Docker wiring) are the
           concrete next steps, in order.
   5. [ ] **8e -- comparison work.** The systematic, empirical
         side-by-side data-gathering against `src/kyber/threshold_decaps`
