@@ -525,8 +525,74 @@ ML-KEM.
           designed in from the start (that track is already a
           from-scratch build, so it wouldn't need the same retrofit-
           plus-parameter-surgery this branch would) rather than
-          revisited here. Design/implementation of tier 1 is the
-          concrete next step.
+          revisited here.
+        - **Parameter derivation done** (`src/tibe/gen_dkg_params.py`,
+          `src/tibe/dkg_params.h`, committed): each of `TIBE_N` parties
+          locally samples `(s_a^(i),e_a^(i))` at `TIBE_DKG_LOCAL_SIGMA
+          =16` (deliberately equal to `GAUSS_CONV_BASE_SIGMA`, so this
+          reuses 8b's exact CDT sampler with *zero* new sampler code);
+          joint width after summing all `TIBE_N` contributions is
+          `~50.60` (documentation only). The V3S "random submersion"
+          matrix `R` is `256x8192` ternary (`TIBE_DKG_R_ROWS/COLS`,
+          Espitau-Niot-Prest's construction reused verbatim). Computed
+          (not eyeballed) accept/reject norm bounds:
+          `TIBE_DKG_SIGMA_Y=2^14`, `TIBE_DKG_B_ACCEPT=342000`,
+          `TIBE_DKG_B_REJECT=1000000` -- honest submissions land
+          `~262,656` (7.45x below the reject-floor Lemma 2 guarantees
+          for an oversized submission), and confirmed numerically that
+          this project's `q~2^101` is so much larger than eprint
+          2024/959's own size-optimized modulus that **no enlarged
+          `q_V3S` is needed** (unlike their Section 6.4) -- our `q`
+          already has ~18 orders of magnitude more headroom than
+          needed. `y` (the ephemeral blinding vector, width `2^14`)
+          also reuses 8b's sampler unmodified (exceeds
+          `GAUSS_DIRECT_MAX_SIGMA`, goes through the same convolution
+          path already validated for `TIBE_SIGMA_PRIME`/`TIBE_SIGMA_P`).
+        - **Remaining implementation checklist** (tracked here so this
+          survives a context/session break):
+          1. [ ] Merkle tree (`merkle.c`/`.h`, new): SHAKE-256-based,
+                leaves = `hash([[x]]_i, [[y]]_i, r_i)`, co-path proofs
+                -- standard, no open design questions left.
+          2. [ ] `v3s.c`/`.h`: `V3S.Share`/`V3S.Verify`/
+                `V3S.Reconstruct` (Figure 4, Algorithms 1-3 --
+                `RobustReconstruct`/Algorithm 4 is tier 2, **not**
+                implemented, per the tier-1 decision above), built on
+                `threshold.c`'s existing Shamir-sharing machinery
+                generalized to the flattened `2*TIBE_D`-dimension
+                secret, plus the ternary `H_R` hash-to-matrix (simple:
+                2 random bits -> `{0,0,+1,-1}` per entry, matching the
+                1/2,1/4,1/4 distribution exactly).
+          3. [ ] Toy-ring symbolic validation of `V3S.Share`/`Verify`'s
+                algebra *before* real BIGNUM code (matching Phase 3/5's
+                discipline) -- particularly the linearity claim
+                `R*[[x]]+[[y]]` is itself a valid `T`-sharing of
+                `R*x+y`, and the soundness/honest-execution norm checks
+                at this project's concrete numbers above.
+          4. [ ] `dkg.c`/`.h`: the `K1`-`K4` protocol (Section 2.2, "From
+                V3S to Distributed Secret Sharing") adapted onto this
+                project's conventions -- round-based state machine
+                matching `threshold_round0/1/2`'s existing shape; `d0`/
+                `a0`/`A0` derivation stays a separate, much simpler
+                question (see "already effectively public" note above)
+                from `(s_a,e_a)`'s DKG, not conflated with it.
+          5. [ ] `test/test_dkg.c`: full `N`-party DKG run producing a
+                real `(T,N)`-Shamir sharing of a genuinely
+                nobody-ever-saw-the-whole-thing joint `(s_a,e_a)`, wired
+                into `test_threshold.c`/`test_tkem.c`-style full-cycle
+                validation (does a `tkem_keygen` via DKG instead of
+                `tibe_setup` still decapsulate correctly?), plus a
+                malicious-local-share detection test (tier 1's actual
+                payoff: a party submitting an oversized/inconsistent
+                local share gets caught and excluded, not silently
+                corrupting the joint key).
+          6. [ ] Docker wiring (`docker-compose.tibe.yml` and friends):
+                real architectural change -- no single `tibe_dealer`
+                process anymore, replaced by an `N`-party joint-setup
+                round. Deferred until 1-5 above are validated
+                standalone; flagged now so it isn't a surprise later.
+        - Design/implementation of tier 1 is in progress -- parameter
+          derivation (item above the checklist) is done; the checklist
+          items above are the concrete next steps, in order.
   5. [ ] **8e -- comparison work.** The systematic, empirical
         side-by-side data-gathering against `src/kyber/threshold_decaps`
         (correctness rates, timing/ciphertext-size overhead) that the
