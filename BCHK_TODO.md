@@ -669,20 +669,71 @@ ML-KEM.
                   `x = sum_{j in valid} x^(j) = (s_a, e_a)`, ready to be
                   used by the *existing*, unmodified
                   `threshold_round0/1/2`/`Combine` exactly like a
-                  `threshold_setup`-issued share. `d0`/`a0`/`A0`
-                  derivation stays a separate, much simpler question
-                  (see "already effectively public" note above), not
-                  conflated with this.
-          5. [ ] `test/test_dkg.c`: full `N`-party DKG run producing a
-                real `(T,N)`-Shamir sharing of a genuinely
-                nobody-ever-saw-the-whole-thing joint `(s_a,e_a)`, wired
-                into `test_threshold.c`/`test_tkem.c`-style full-cycle
-                validation (does a `tkem_keygen` via DKG instead of
-                `tibe_setup` still decapsulate correctly?), plus a
+                  `threshold_setup`-issued share.
+                - **Correction to the "d0/a0/A0... much simpler"
+                  framing above, found while designing `test/test_dkg.c`
+                  (item 5): it understated the remaining work.**
+                  `threshold.h`'s "`d0` is effectively public" comment
+                  is true only *after* Setup has already happened (it's
+                  about decapsulation not needing `d0` re-shared) -- it
+                  says nothing about how `d0`/`a0` themselves would be
+                  *generated* without a trusted dealer, which is a
+                  different question this checklist item conflated with
+                  the first. Checked directly against `tibe_setup`
+                  (`tibe.c`): `A1`, `A2`, `G`, `r` are all independently/
+                  uniformly sampled, genuinely unrelated to
+                  `(s_a,e_a)` -- but `A0`'s `b0` component
+                  (`b0 = a0*s_a+e_a-beta`) is **not**; it's a real,
+                  direct function of the secret this DKG is
+                  distributing. A fully dealer-free Setup therefore
+                  needs, beyond this checklist's items 1-4: (a) `a0`/
+                  `d0`'s own distributed, jointly-unbiased generation
+                  (a "coin-flipping" problem -- commit-then-reveal is
+                  the standard, well-precedented technique, not
+                  attempted here), and (b) a further "reveal a public
+                  linear combination of a DKG'd secret" round for `b0`
+                  specifically (each party locally computes
+                  `b0_j := a0*s_a^(j)+e_a^(j)` from its own local
+                  contribution and the now-public `a0`, then all
+                  `TIBE_N` parties reveal/sum these in the open --
+                  `b0 = (sum_j b0_j) - beta` -- the same "reveal a
+                  public function of many private local values, no
+                  single value ever exposed" pattern already used
+                  elsewhere in this project's protocol, e.g. `w`
+                  becoming public after decapsulation's round 1, so not
+                  novel machinery, but genuinely unbuilt). **Not
+                  implemented in this pass** -- flagged honestly as
+                  real remaining scope for a *fully* dealer-free
+                  system, distinct from `(s_a,e_a)`'s DKG itself (items
+                  1-4), which stands on its own and is complete and
+                  tested regardless.
+          5. [ ] `test/test_dkg.c`: full `TIBE_N`-party DKG run
+                (rounds 1-3) producing a real `(T,N)`-Shamir sharing of
+                a genuinely nobody-ever-saw-the-whole-thing-during-the-
+                protocol joint `(s_a,e_a)`. Given the `b0`-reveal gap
+                just found (not yet built, see the correction above),
+                the "does this plug into the existing decapsulation
+                protocol" check is necessarily a **hybrid** validation,
+                not a fully dealer-free one: `d0`/`a0` sampled the same
+                way `tibe_setup` already does, `b0`/`A0` computed
+                *directly* from the DKG's true joint secret via a
+                test-only reconstruction (summing every party's real
+                `x^(j)`, something only the test orchestrator -- not
+                any protocol participant -- ever does, exactly
+                mirroring how `test_v3s.c` already validates its own
+                correctness this way) purely so `ek` is internally
+                consistent enough to run the real, unmodified
+                `threshold_round0/1/2`/`Combine` against the DKG-issued
+                shares and confirm decapsulation recovers the correct
+                message. This validates the genuinely load-bearing claim
+                (DKG output is a mathematically valid Shamir sharing the
+                existing protocol accepts) without overclaiming a fully
+                dealer-free system, which isn't built yet. Plus a
                 malicious-local-share detection test (tier 1's actual
                 payoff: a party submitting an oversized/inconsistent
-                local share gets caught and excluded, not silently
-                corrupting the joint key).
+                local share gets caught and excluded via Round 3's
+                unanimous-positive rule, not silently corrupting the
+                joint key).
           6. [ ] Docker wiring (`docker-compose.tibe.yml` and friends):
                 real architectural change -- no single `tibe_dealer`
                 process anymore, replaced by an `N`-party joint-setup
