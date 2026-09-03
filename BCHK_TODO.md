@@ -431,17 +431,102 @@ ML-KEM.
           implementation paper is in a publishable position -- not
           before, and not blocking it. See "Future: paper writeups"
           below for how this splits the eventual writeup(s).
-  4. [ ] **8d -- distributed key generation (DKG).** Removes the
-        trusted-dealer assumption (`Remark 1`, `src/dealer.c`'s Kyber
-        role and `src/tibe_dealer.c`'s role alike). **Neither the base
-        paper nor the 2026 follow-up specifies a DKG for this
-        construction** -- this is a materially different, larger item
-        than 8a-8c: not "implement what the paper already fully
-        specifies" but either a genuine design contribution built on
-        general MPC/DKG literature, or a scoped-down/deferred goal.
-        Flagged honestly now rather than assumed to be
-        similarly-sized to the items above; worth an explicit
-        scope/feasibility discussion before starting.
+  4. [ ] **8d -- distributed key generation (DKG). Scoping done,
+        decided with the project owner (2026-09-03); design/
+        implementation in progress.** Removes the trusted-dealer
+        assumption (`Remark 1`, `src/dealer.c`'s Kyber role and
+        `src/tibe_dealer.c`'s role alike) -- this is the *last*
+        remaining point in the whole system where any single party
+        ever knows the full secret, even under the already-implemented
+        BCHK+-2025 construction (the dealer briefly knows `(s_a,e_a)`
+        at Setup time), so closing it is arguably the single highest-
+        value remaining step toward the project's original "key never
+        known" goal -- more directly so than 8c/robustness was.
+        - **Code investigation first** (not just the papers): `d0`/`a0`
+          (Setup's other outputs besides `(s_a,e_a)`) are *already*
+          effectively public in this project's design --
+          `threshold.h` documents `d0` as "NOT secret-shared...
+          effectively public, known to every party." So DKG's real
+          scope narrows to just distributing the generation of
+          `(s_a,e_a)`, not re-deriving everything Setup does; `d0`/`a0`
+          could in principle be a public, nothing-up-my-sleeve
+          derivation (no MPC needed), same style as `q`/`r1`/`r2` in
+          `gen_params.py` -- not yet designed, but a real
+          simplification worth keeping in mind when this gets built.
+        - **Correctness-bound re-verification** (matching Phase 3's
+          "re-read the actual paper pages, don't trust the secondhand
+          transcription" discipline): summing N parties' independent
+          local Gaussian contributions to jointly generate `(s_a,e_a)`
+          necessarily produces a *wider* effective `ς_a` than the
+          paper's proven `ς_a=8` (a provably-sound combination needs
+          each party's local width to already be at least
+          `sqrt(2)*eta_eps(Z) ~ 8.49`, itself larger than `ς_a=8`).
+          Checked directly against eprint 2025/1958's actual page
+          images (Theorem 5's proof, pages 27-29), not just
+          `BCHK_PAPER_SPEC.md`'s summary: `B` (the correctness bound's
+          governing quantity) is dominated by `beta/2` regardless of
+          `ς_a` (the paper's own authors state this explicitly on
+          page 29: "we may simply increase `ς_a` ... as long as
+          Equation (13) is satisfied") -- so a DKG-widened `ς_a` costs
+          essentially nothing in correctness margin. Confirmed, not
+          assumed.
+        - **Literature pass on a DKG construction found via this
+          re-verification's own reference list**: eprint 2025/1958
+          cites Espitau, Niot, Prest, *"Flood and Submerse: Distributed
+          Key Generation and Robust Threshold Signature from Lattices"*
+          (CRYPTO 2024, eprint 2024/959) -- read through its core
+          protocols (~25 pages: technical overview, the V3S primitive,
+          the DKG protocol `K1`-`K4`/Figure 5, the Pelican robust
+          threshold signature it enables). This is a real, standard-
+          MLWE-hardness, no-FHE, peer-reviewed DKG technique for
+          lattice threshold schemes specifically (partially overlapping
+          authors with the base BCHK+ paper), not something invented
+          for this project. **Finding: the paper actually offers two
+          tiers**, and only one of them fits this project cleanly as-is:
+          1. **"VSSS with detection of malicious behavior"** (the
+             simpler protocol, their Sec. 4.3): aborts on any detected
+             misbehavior, needs only "at least `T` honest parties" --
+             matches this project's *existing* threat model exactly
+             (the same detect-not-recover posture decapsulation already
+             has, per 8c's "Robust: No" note). **No parameter changes
+             needed** -- `T=5, N=10` stays valid.
+          2. **"Robust V3S"** (the stronger protocol underlying their
+             full Pelican DKG, Figure 5): genuinely *recovers* despite
+             malicious parties via Reed-Solomon-style robust
+             reconstruction, but needs an honest supermajority (their
+             DKG assumes "2 out of 3 participants honest," i.e.
+             corrupted count `< N/3`) -- this project's `T/N = 5/10 =
+             0.5` violates that; would need `T<=3` at `N=10` or
+             `N>=15` at `T=5`. Interestingly, this tier's *same*
+             machinery also gives their Pelican scheme genuinely robust
+             *threshold signing* (not just DKG) -- "signing is
+             essentially the keygen procedure with extra steps" -- a
+             more promising, better-grounded lead for real decapsulation
+             robustness than the *other* 2026 paper's Vandermonde
+             sharing (eprint 2026/021, see 8c above), since it wouldn't
+             require abandoning this project's existing TIBE core at
+             all. **Not demonstrated by the paper for our setting**,
+             though -- the authors themselves only instantiate it for
+             their own signature scheme, explicitly flagging even
+             applying it to a *different* signature scheme (Raccoon) as
+             unstarted future work, so applying it to a TIBE/KEM (not a
+             signature scheme) at all would be genuine, undemonstrated
+             adaptation work, on top of the real `T<=N/3`-style
+             parameter change.
+        - **Decided with the project owner, 2026-09-03**: implement 8d
+          now using **tier 1** (VSSS-with-detection) -- real, low-risk,
+          closes the trusted-dealer gap completely, no parameter
+          changes, and is a genuinely new combination (this DKG
+          technique has never been applied to a BCHK+-style TIBE
+          before, by anyone). **Tier 2 is *not* being pursued against
+          this branch's existing TIBE** -- flagged instead as a
+          possible design choice for the future 2026/021 track (Paper
+          C, see "Future: paper writeups" below), where it could be
+          designed in from the start (that track is already a
+          from-scratch build, so it wouldn't need the same retrofit-
+          plus-parameter-surgery this branch would) rather than
+          revisited here. Design/implementation of tier 1 is the
+          concrete next step.
   5. [ ] **8e -- comparison work.** The systematic, empirical
         side-by-side data-gathering against `src/kyber/threshold_decaps`
         (correctness rates, timing/ciphertext-size overhead) that the
@@ -519,7 +604,17 @@ implemented.
    `T=32, Q=2^45`) -- distinct enough technical content (a different
    trapdoor family, a different secret-sharing primitive, native
    robustness Paper B's system structurally cannot have) to stand as
-   its own paper, not a revision of Paper B's.
+   its own paper, not a revision of Paper B's. **Possible extra angle,
+   noted 2026-09-03, not decided**: this track could also design in
+   "Robust V3S" (the stronger tier from Espitau-Niot-Prest's DKG paper,
+   eprint 2024/959 -- see 8d above) from the start, rather than the
+   detection-only tier 8d uses on this branch, since a from-scratch
+   build doesn't need this branch's retrofit-plus-parameter-surgery to
+   satisfy its `T<=N/3`-style honest-majority requirement -- would give
+   Paper C genuinely *recoverable* robustness (not just detect-and-
+   abort) at both DKG and decapsulation time, on top of 2026/021's own
+   Vandermonde-sharing robustness. Revisit when that track actually
+   starts, not before.
 4. **Paper D -- comparison paper**: results-based, comparing whichever
    of A/B/C exist at the time it's written (at minimum B vs. A;
    ideally eventually B vs. C, or all three) -- correctness rates,
