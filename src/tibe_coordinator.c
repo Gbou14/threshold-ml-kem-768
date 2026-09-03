@@ -101,7 +101,14 @@ http_post_json(const char* url, const char* json)
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L); /* payloads are large; rounds can be slow */
+    /* src/tibe/README.md documents round0 alone costing ~500s summed
+     * across T=5 parties -- a single party's own share of that,
+     * under real Docker Compose CPU contention with 10+ concurrent
+     * shareholder containers on one host, can exceed what a 120s cap
+     * assumed (caught live: a real round0 call timed out at 120s).
+     * The whole trial budget is ~30 minutes, so give one call a
+     * generous fraction of it rather than a tight per-call guess. */
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 1800L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
     CURLcode res = curl_easy_perform(curl);
     long code = 0;

@@ -216,6 +216,15 @@ serialize_coeffs(uint8_t* out, BIGNUM* const* coeffs, int n)
 }
 
 static void
+deserialize_coeffs(BIGNUM* const* coeffs, const uint8_t* in, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        BN_bin2bn(in + (size_t)i * TIBE_Q_BYTES, TIBE_Q_BYTES, coeffs[i]);
+    }
+}
+
+static void
 leaf_hash(uint8_t out[MERKLE_HASH_BYTES], BIGNUM* const x_share[V3S_DIM_X], BIGNUM* const y_share[V3S_DIM_Y],
           const uint8_t nonce[MERKLE_HASH_BYTES])
 {
@@ -525,4 +534,46 @@ v3s_reconstruct(v3s_secret* out, BIGNUM* const x_shares[/* act_size */][V3S_DIM_
     }
     BN_free(q_half);
     return ok;
+}
+
+void
+v3s_recipient_data_serialize(uint8_t* out, const v3s_recipient_data* rd)
+{
+    size_t x_bytes = (size_t)V3S_DIM_X * TIBE_Q_BYTES;
+    size_t y_bytes = (size_t)V3S_DIM_Y * TIBE_Q_BYTES;
+    serialize_coeffs(out, rd->x_share, V3S_DIM_X);
+    serialize_coeffs(out + x_bytes, rd->y_share, V3S_DIM_Y);
+    memcpy(out + x_bytes + y_bytes, rd->nonce, MERKLE_HASH_BYTES);
+    merkle_proof_serialize(out + x_bytes + y_bytes + MERKLE_HASH_BYTES, &rd->proof);
+}
+
+void
+v3s_recipient_data_deserialize(v3s_recipient_data* rd, const uint8_t* in)
+{
+    size_t x_bytes = (size_t)V3S_DIM_X * TIBE_Q_BYTES;
+    size_t y_bytes = (size_t)V3S_DIM_Y * TIBE_Q_BYTES;
+    deserialize_coeffs(rd->x_share, in, V3S_DIM_X);
+    deserialize_coeffs(rd->y_share, in + x_bytes, V3S_DIM_Y);
+    memcpy(rd->nonce, in + x_bytes + y_bytes, MERKLE_HASH_BYTES);
+    merkle_proof_deserialize(&rd->proof, in + x_bytes + y_bytes + MERKLE_HASH_BYTES);
+}
+
+void
+v3s_public_serialize(uint8_t* out, const uint8_t root[MERKLE_HASH_BYTES], BIGNUM* const v_shares[TIBE_N][V3S_DIM_Y])
+{
+    memcpy(out, root, MERKLE_HASH_BYTES);
+    for (int i = 0; i < TIBE_N; i++)
+    {
+        serialize_coeffs(out + MERKLE_HASH_BYTES + (size_t)i * V3S_DIM_Y * TIBE_Q_BYTES, v_shares[i], V3S_DIM_Y);
+    }
+}
+
+void
+v3s_public_deserialize(uint8_t root[MERKLE_HASH_BYTES], BIGNUM* v_shares[TIBE_N][V3S_DIM_Y], const uint8_t* in)
+{
+    memcpy(root, in, MERKLE_HASH_BYTES);
+    for (int i = 0; i < TIBE_N; i++)
+    {
+        deserialize_coeffs(v_shares[i], in + MERKLE_HASH_BYTES + (size_t)i * V3S_DIM_Y * TIBE_Q_BYTES, V3S_DIM_Y);
+    }
 }

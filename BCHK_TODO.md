@@ -757,13 +757,96 @@ ML-KEM.
                   cycle, dominated by the *existing* threshold
                   protocol's own established cost, plus the malicious-
                   dealer-exclusion run) takes **~27m17s** wall clock.
-          6. [ ] Docker wiring (`docker-compose.tibe.yml` and friends):
+          6. [x] Docker wiring (`docker-compose.tibe.yml` and friends):
                 real architectural change -- no single `tibe_dealer`
                 process anymore, replaced by an `N`-party joint-setup
                 round. **Reordered, 2026-09-03, per the project owner**:
                 item 7 below (finishing the fully dealer-free system)
                 now comes *before* this, so Docker gets wired once for
                 the complete design rather than twice.
+                - `tibe_shareholder.c` grew 5 new peer-facing endpoints
+                  (`/dkg_round1`..`/dkg_round4`, `GET /dkg_get_public`)
+                  plus a `peer_post()` HTTP client and per-recipient
+                  `/dkg_receive` so PRIVATE V3S share data and `b0`
+                  masks travel directly shareholder-to-shareholder,
+                  never through the coordinator -- if the coordinator
+                  saw that data it would hold a full T-of-N share set
+                  per party and could reconstruct every secret itself,
+                  defeating the DKG's purpose. `tibe_dealer.c` was
+                  rewritten as a pure relay of PUBLIC broadcast data
+                  only (roots, v_shares, a0/d0 commit/reveal, verdicts,
+                  b0 contributions) across the 4 rounds, then fetches
+                  the resulting `ek`/`d0` (both public regardless of
+                  how generated) from one party and writes them to the
+                  shared volume for `tibe_coordinator` -- it never
+                  computes or holds `(s_a,e_a)`, `a0`, `d0`, or `b0`.
+                - **A fourth real bug, this time in the validation
+                  process itself, not the code**: the first live
+                  `docker compose -f docker-compose.tibe.yml up -d` run
+                  showed *every* shareholder failing all 60
+                  `wait_healthy` retries -- looked like a regression,
+                  but each shareholder's own container log showed a
+                  clean "Ready." with no errors, and a fresh `curl`
+                  container on the same network got a plain `GET
+                  /health` 200 but a `HEAD /health` 404. Root cause:
+                  `docker compose up -d` had reused cached images built
+                  **2 days earlier** (`docker images` timestamps
+                  confirmed it), i.e. the entire day's DKG/`a0`/`d0`/
+                  `b0` work -- including the Phase 7 GET-or-HEAD
+                  `/health` fix already present in source -- had never
+                  actually been rebuilt into the running containers.
+                  Fixed with an explicit `docker compose build` before
+                  `up -d`; not a code defect, but a reminder that
+                  `docker compose up -d` alone does not imply a rebuild.
+                - **Confirmed with a live run, full multi-container
+                  demo, measured (2026-09-03)**: after the rebuild, all
+                  10 shareholders answered healthy immediately, then
+                  `tibe_dealer` drove all 4 DKG rounds to completion
+                  across all 10 parties, wrote `ek` (692224 bytes) and
+                  `d0` (53248 bytes) to the shared volume, exited 0,
+                  and logged "No party, including this one, ever held
+                  (s_a,e_a)." `tibe_coordinator` then started
+                  automatically (`depends_on:
+                  service_completed_successfully`), loaded `ek`/`d0`,
+                  and began its real `tkem_encaps` ->
+                  threshold-decapsulation trial. This is the crown-jewel
+                  result (8d item 7) now validated in the actual
+                  Docker Compose topology, not just `test_dkg_pubkey.c`
+                  in isolation.
+                - **A fifth real bug, in `tibe_coordinator.c` this
+                  time, caught by the same live run**: the first
+                  `tibe_coordinator` trial failed outright --
+                  `POST http://tsh2:8080/round0 failed (curl=28
+                  http=100)`, a plain libcurl timeout, giving
+                  `tkem_success=0 aes_success=0`. Root cause:
+                  `http_post_json`'s `CURLOPT_TIMEOUT` was hardcoded to
+                  120s, but `src/tibe/README.md` already documented
+                  `round0` alone costing ~500s summed across `T=5`
+                  parties -- one party's own share of that, under real
+                  Docker Compose CPU contention with 10+ shareholder
+                  containers competing for the same host, comfortably
+                  exceeds 120s. This was a latent bug from Phase 7 that
+                  a real, full-cost, live HTTP round trip had
+                  apparently never previously exercised end to end (the
+                  in-process test suites don't go through libcurl at
+                  all, so they couldn't have caught it). Fixed by
+                  raising the timeout to 1800s -- a generous fraction
+                  of the trial's own documented ~30-minute budget
+                  rather than another tight guess.
+                - **Confirmed, full live round trip, after the timeout
+                  fix (2026-09-03)**: rebuilt just the
+                  `tibe_coordinator` image and re-ran it against the
+                  same `ek`/`d0` already written by the earlier
+                  successful dealer run (no need to redo the ~20-minute
+                  DKG setup). All 5 active parties completed
+                  `round0`/`round1`/`round2`, `tkem_combine` succeeded,
+                  and the AES-256-GCM round trip decrypted back to the
+                  exact plaintext: `data/tibe_results.csv` shows
+                  `tkem_success=1, aes_success=1, message="Hello from
+                  threshold BCHK+!", decrypted="Hello from threshold
+                  BCHK+!"`. This is the first fully-successful live
+                  Docker Compose run of the complete dealer-free
+                  BCHK+ system, start to finish.
           7. [x] **`a0`/`d0`/`b0`: completing the fully dealer-free
                 system.** New `dkg_pubkey.c`/`.h`, layered on top of
                 `dkg.c` (reuses each party's already-sampled local `x`
@@ -872,14 +955,17 @@ ML-KEM.
                   commit-reveal to cover these 7 more ring elements
                   the same way `a0`/`d0` are covered) is real, bounded,
                   future work, not attempted in this pass.
-        - **Items 1-5 and 7 are done and validated**: parameter
+        - **All items 1-7 are done and validated**: parameter
           derivation, the Merkle tree, V3S, this project's own 3-round
-          tier-1 DKG protocol for `(s_a,e_a)`, its test suite, and now
+          tier-1 DKG protocol for `(s_a,e_a)`, its test suite,
           `a0`/`d0`/`b0`'s own distributed generation completing a
-          genuinely, fully dealer-free keygen -- confirmed end to end,
-          not just each piece in isolation. **Item 6 (Docker wiring)
-          is the only remaining piece**, and can now be built once for
-          the complete design.
+          genuinely, fully dealer-free keygen, and now Docker wiring
+          confirmed with a live multi-container run end to end (10
+          shareholders, dealer, coordinator) -- not just each piece in
+          isolation, **and** a live `tibe_coordinator` decapsulation
+          trial confirmed successful (`tkem_success=1, aes_success=1`,
+          exact plaintext round trip) after fixing a real HTTP-timeout
+          bug the live run itself surfaced. **8d is complete.**
   5. [ ] **8e -- comparison work.** The systematic, empirical
         side-by-side data-gathering against `src/kyber/threshold_decaps`
         (correctness rates, timing/ciphertext-size overhead) that the

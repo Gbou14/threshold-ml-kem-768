@@ -152,3 +152,24 @@ merkle_proof_verify(const uint8_t root[MERKLE_HASH_BYTES], const uint8_t leaf[ME
     }
     return memcmp(cur, root, MERKLE_HASH_BYTES) == 0;
 }
+
+void
+merkle_proof_serialize(uint8_t out[MERKLE_PROOF_SERIALIZED_BYTES], const merkle_proof* proof)
+{
+    out[0] = (uint8_t)proof->depth;
+    memset(out + 1, 0, MERKLE_MAX_DEPTH * MERKLE_HASH_BYTES);
+    for (int lvl = 0; lvl < proof->depth; lvl++)
+    {
+        memcpy(out + 1 + (size_t)lvl * MERKLE_HASH_BYTES, proof->siblings[lvl], MERKLE_HASH_BYTES);
+    }
+}
+
+void
+merkle_proof_deserialize(merkle_proof* proof, const uint8_t in[MERKLE_PROOF_SERIALIZED_BYTES])
+{
+    proof->depth = in[0];
+    for (int lvl = 0; lvl < proof->depth; lvl++)
+    {
+        memcpy(proof->siblings[lvl], in + 1 + (size_t)lvl * MERKLE_HASH_BYTES, MERKLE_HASH_BYTES);
+    }
+}

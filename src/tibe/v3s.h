@@ -97,6 +97,23 @@ void v3s_recipient_data_init(v3s_recipient_data* rd);
 void v3s_recipient_data_free(v3s_recipient_data* rd);
 void v3s_share_extract_recipient(v3s_recipient_data* rd, const v3s_share_output* out, int to_index);
 
+/* Fixed-width wire-format serialization -- Phase 8d's Docker wiring
+ * sends this directly, peer-to-peer, between shareholders (bypassing
+ * the coordinator for this specific bulk private payload; see
+ * BCHK_TODO.md Phase 8d's Docker-wiring notes). */
+#define V3S_RECIPIENT_DATA_SERIALIZED_BYTES                                                                          \
+    ((size_t)V3S_DIM_X * TIBE_Q_BYTES + (size_t)V3S_DIM_Y * TIBE_Q_BYTES + MERKLE_HASH_BYTES +                       \
+     MERKLE_PROOF_SERIALIZED_BYTES)
+void v3s_recipient_data_serialize(uint8_t* out, const v3s_recipient_data* rd);
+void v3s_recipient_data_deserialize(v3s_recipient_data* rd, const uint8_t* in);
+
+/* Fixed-width wire-format for the dealer's public broadcast:
+ * root + all TIBE_N v_shares. */
+#define V3S_PUBLIC_SERIALIZED_BYTES (MERKLE_HASH_BYTES + (size_t)TIBE_N * V3S_DIM_Y * TIBE_Q_BYTES)
+void v3s_public_serialize(uint8_t* out, const uint8_t root[MERKLE_HASH_BYTES],
+                           BIGNUM* const v_shares[TIBE_N][V3S_DIM_Y]);
+void v3s_public_deserialize(uint8_t root[MERKLE_HASH_BYTES], BIGNUM* v_shares[TIBE_N][V3S_DIM_Y], const uint8_t* in);
+
 /* V3S.Verify_i: run by the recipient at `my_index` (0-indexed). Checks
  * the Merkle proof, the local linear consistency v_i == R*x_i+y_i,
  * and the shortness bound (||v|| <= TIBE_DKG_B_ACCEPT, v reconstructed

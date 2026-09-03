@@ -1,15 +1,44 @@
 /*
  * tibe_shareholder.c -- HTTP server for one BCHK+ threshold-KEM
- * shareholder party (Phase 7, the TIBE/BCHK+ counterpart to
- * shareholder.c's Kyber-side role).
+ * shareholder party (Phase 7 for decapsulation; Phase 8d for setup --
+ * the TIBE/BCHK+ counterpart to shareholder.c's Kyber-side role).
  *
  * REST API:
  *   GET  /health
- *   POST /store_share  -- receives this party's private share (its
- *                          Shamir shares of s_a/e_a, d0, and the
- *                          pairwise-seed table); the master secret
- *                          (s_a, e_a) itself is never reconstructed
- *                          here or anywhere
+ *
+ *   -- Phase 8d, distributed setup (replaces the old dealer-issued
+ *   /store_share entirely -- see BCHK_TODO.md Phase 8d, and dkg.h/
+ *   dkg_pubkey.h for the underlying protocol). Orchestrated by
+ *   tibe_dealer.c calling dkg_round1..dkg_round4 on every shareholder
+ *   in sequence, relaying only PUBLIC broadcast data between rounds --
+ *   dkg_receive is peer-to-peer instead, bypassing the coordinator,
+ *   since it carries each party's PRIVATE per-recipient share data:
+ *   POST /dkg_round1   -- generates this party's own local secret
+ *                          contribution, V3S-shares it, and DIRECTLY
+ *                          POSTs each other party its private payload
+ *                          via /dkg_receive; returns this party's
+ *                          public V3S data + a0/d0 commitment
+ *   POST /dkg_receive  -- peer-to-peer target: stores another party's
+ *                          private V3S payload (and, if that party's
+ *                          index is lower than this one's, a fresh
+ *                          pairwise seed and one-time b0-masking value)
+ *   POST /dkg_round2   -- given every party's public data (relayed by
+ *                          the coordinator), verifies every privately-
+ *                          received payload and returns this party's
+ *                          verdict vector, plus its a0/d0 reveal (safe
+ *                          now that every commitment is already
+ *                          locked in)
+ *   POST /dkg_round3   -- given every verdict vector and a0/d0 reveal,
+ *                          finalizes a0/d0, aggregates this party's
+ *                          own final Shamir share of (s_a,e_a), and
+ *                          returns its masked b0 contribution
+ *   POST /dkg_round4   -- given every b0 contribution, finalizes b0,
+ *                          derives A1/A2/G/r, and assembles this
+ *                          party's own local copy of ek -- (s_a,e_a)
+ *                          is never reconstructed by any party, ever,
+ *                          at any point in this whole sequence
+ *
+ *   -- Decapsulation (unchanged from Phase 7):
  *   POST /round0       -- Algorithm 5 (via tkem_share_decaps_0):
  *                          verifies the ciphertext's WOTS+ signature
  *                          *before* doing any threshold-decryption
@@ -27,25 +56,32 @@
  * One decapsulation session (round0->round1->round2) is handled at a
  * time via global state, matching shareholder.c's existing
  * architecture -- not safe for concurrent sessions, fine for this
- * demo where the coordinator drives one session at a time.
+ * demo where the coordinator drives one session at a time. Likewise
+ * only one distributed-setup run is supported per process lifetime.
  *
  * Request/response bodies here are much larger than the Kyber
  * demo's (a single ring element serializes to ~53 KB; a full
- * ciphertext to ~535 KB), so unlike shareholder.c's fixed 8 KB
- * buffer, request bodies are accumulated into a dynamically-grown
- * buffer.
+ * ciphertext to ~535 KB; a single v3s_recipient_data to ~110 KB), so
+ * unlike shareholder.c's fixed 8 KB buffer, request bodies are
+ * accumulated into a dynamically-grown buffer.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <curl/curl.h>
 #include <microhttpd.h>
 #include <openssl/bn.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 #include "hexutil.h"
+#include "tibe/dkg.h"
+#include "tibe/dkg_pubkey.h"
 #include "tibe/threshold.h"
 #include "tibe/tkem.h"
+#include "tibe/v3s.h"
 
 /* ── Party state ─────────────────────────────────────────────────────────── */
 static threshold_share g_share;
@@ -60,43 +96,160 @@ static int g_session_active = 0; /* round0 has run for g_ct, valid through round
 
 static BN_CTX* g_ctx;
 
-/* ── ek: lazily loaded from the shared volume (the dealer writes it
- * after this shareholder is already answering /health, so it can't
- * be loaded at startup without deadlocking the dealer's own
- * wait-for-healthy loop -- see src/tibe_dealer.c). ── */
-static int
-ensure_ek_loaded(void)
+/* ── Phase 8d: distributed setup state ───────────────────────────────────
+ *
+ * Replaces tibe_dealer.c's old centralized TKEM.Keygen entirely -- see
+ * BCHK_TODO.md Phase 8d. This shareholder now participates in a
+ * 4-round protocol (dkg_round1..dkg_round4 below) orchestrated by
+ * tibe_dealer.c (which itself never sees any secret -- it only relays
+ * PUBLIC broadcast data between rounds: roots, v_shares, a0/d0
+ * commitments and reveals, verdict vectors, b0 contributions).
+ *
+ * The one thing tibe_dealer.c does NOT relay is each party's PRIVATE
+ * v3s_recipient_data (its individual Shamir sub-shares of every other
+ * party's local secret) and the one-time b0-masking values -- those
+ * go directly shareholder-to-shareholder over /dkg_receive, bypassing
+ * the coordinator entirely. This is not an optional simplification:
+ * if the coordinator saw every (dealer,recipient) private payload, it
+ * would have enough shares to reconstruct every party's secret itself
+ * (a full T-of-N share set), becoming a trusted dealer again and
+ * defeating the whole point.
+ */
+static int g_my_index = -1;                                     /* 0-indexed */
+static int g_n_hosts = 0;                                        /* peer count, should equal TIBE_N */
+static char g_peer_hosts[TIBE_N][128];
+static int g_peer_port = 0;
+
+static dkg_round1_state g_dkg_state;
+static dkg_public_share g_dkg_pub[TIBE_N];                       /* dealer j's public V3S data */
+static int g_dkg_pub_ready[TIBE_N];
+static v3s_recipient_data g_dkg_recv[TIBE_N];                    /* what dealer j privately sent this party */
+static int g_dkg_recv_ready[TIBE_N];
+static uint8_t g_pairseed_recv[TIBE_N][TIBE_SEED_BYTES];         /* pairwise seed received from j (j < my_index) */
+static int g_pairseed_recv_ready[TIBE_N];
+static uint8_t g_pairseed_sent[TIBE_N][TIBE_SEED_BYTES];         /* pairwise seed this party generated for j (j > my_index) */
+static ring_elem g_b0mask_recv[TIBE_N];                           /* b0-masking value received from j (j < my_index) */
+static int g_b0mask_recv_ready[TIBE_N];
+
+static dkg_pubkey_round1_state g_pk_state;
+static uint8_t g_pk_cmt[DKG_PUBKEY_CMT_BYTES];
+static uint8_t g_pk_cmts[TIBE_N][DKG_PUBKEY_CMT_BYTES];
+
+static int g_verdicts[TIBE_N][TIBE_N]; /* g_verdicts[k][j]: party k's verdict on dealer j */
+static int g_valid[TIBE_N];            /* (s_a,e_a) DKG valid set */
+
+static ring_elem g_a0_reveal[TIBE_N], g_d0_reveal[TIBE_N]; /* every party's revealed a0/d0 contribution */
+static int g_valid_ab[TIBE_N];
+static ring_elem g_a0, g_d0;
+
+static ring_elem g_b0_contribs[TIBE_N];
+static ring_elem g_b0;
+
+static int g_setup_done = 0;
+
+/* ── Peer-to-peer HTTP client (Phase 8d): this shareholder POSTing
+ * directly to another shareholder, bypassing the coordinator -- see
+ * the file header comment on why this must not go through the
+ * coordinator. Mirrors tibe_dealer.c's own http_post helper. ── */
+static long
+peer_post(const char* host, int port, const char* path, const char* json)
 {
-    if (g_ek_ready)
+    char url[256];
+    snprintf(url, sizeof(url), "http://%s:%d%s", host, port, path);
+    CURL* curl = curl_easy_init();
+    if (!curl)
     {
-        return 1;
+        return -1;
     }
-    const char* path = getenv("TIBE_EK_PATH");
-    if (!path)
+    struct curl_slist* hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L); /* v3s_recipient_data hex is ~220KB */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    CURLcode res = curl_easy_perform(curl);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    if (res != CURLE_OK)
     {
-        path = "/data/tibe_ek.bin";
+        fprintf(stderr, "[tibe_sh] peer_post to %s: %s\n", url, curl_easy_strerror(res));
+        return -1;
     }
-    size_t ek_bytes = tibe_ek_serialized_bytes();
-    uint8_t* buf = malloc(ek_bytes);
-    for (int attempt = 0; attempt < 120; attempt++)
+    return code;
+}
+
+/* ── Deterministic derivation of A1/d2/a2/b2/r (Phase 8d): these are
+ * independent of (s_a,e_a)/a0/d0/b0 in tibe_setup, and G's g is
+ * already a pure function of q (tibe_compute_g), so this is the only
+ * remaining piece needed to build ek without a dealer. Derived here
+ * from a hash of every party's public round-1/round-2 broadcast data
+ * (all TIBE_N (root,v_shares) blobs and all TIBE_N a0/d0 commitments),
+ * which every honest party computes identically with zero further
+ * coordination.
+ *
+ * Deliberately flagged, not silently presented as equivalent to
+ * a0/d0's own coin-flip: this does NOT have the same bias-resistance
+ * guarantee. A party's own commitment is hiding, but nothing stops a
+ * malicious *last-committing* party from trying several candidate
+ * (a0_i,d0_i) contributions locally before submitting, each yielding
+ * a different downstream hash here, and picking whichever favors it
+ * -- the same class of concern the coin-flip protocol exists to
+ * prevent for a0/d0 specifically. Acceptable for this demo because it
+ * does not touch the plaintext-key-exposure property Phase 8d's DKG
+ * actually targets; a rigorous fix (extending dkg_pubkey.c's
+ * commit-reveal to cover these too) is documented, scoped future
+ * work, not attempted here. See BCHK_TODO.md Phase 8d. */
+static void
+derive_public_setup_material(ring_elem A1[3], ring_elem* d2, ring_elem* a2, ring_elem* b2, ring_elem* r,
+                              BN_CTX* ctx)
+{
+    size_t chunk = V3S_PUBLIC_SERIALIZED_BYTES;
+    size_t total = (size_t)TIBE_N * chunk + (size_t)TIBE_N * DKG_PUBKEY_CMT_BYTES;
+    uint8_t* buf = malloc(total);
+    for (int i = 0; i < TIBE_N; i++)
     {
-        FILE* f = fopen(path, "rb");
-        if (f)
-        {
-            size_t n = fread(buf, 1, ek_bytes, f);
-            fclose(f);
-            if (n == ek_bytes)
-            {
-                tibe_ek_deserialize(&g_ek, buf);
-                free(buf);
-                g_ek_ready = 1;
-                return 1;
-            }
-        }
-        sleep(1);
+        v3s_public_serialize(buf + (size_t)i * chunk, g_dkg_pub[i].root, g_dkg_pub[i].v_shares);
     }
+    for (int i = 0; i < TIBE_N; i++)
+    {
+        memcpy(buf + (size_t)TIBE_N * chunk + (size_t)i * DKG_PUBKEY_CMT_BYTES, g_pk_cmts[i], DKG_PUBKEY_CMT_BYTES);
+    }
+
+    uint8_t seed[32];
+    EVP_MD* md = EVP_MD_fetch(NULL, "SHAKE256", NULL);
+    EVP_MD_CTX* mctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex2(mctx, md, NULL);
+    EVP_DigestUpdate(mctx, buf, total);
+    EVP_DigestFinalXOF(mctx, seed, sizeof(seed));
+    EVP_MD_CTX_free(mctx);
+    EVP_MD_free(md);
     free(buf);
-    return 0;
+
+    size_t rb = ring_serialized_bytes();
+    size_t out_len = 7 * rb; /* A1[3], d2, a2, b2, r */
+    uint8_t* out = malloc(out_len);
+    EVP_MD* md2 = EVP_MD_fetch(NULL, "SHAKE256", NULL);
+    EVP_MD_CTX* mctx2 = EVP_MD_CTX_new();
+    EVP_DigestInit_ex2(mctx2, md2, NULL);
+    EVP_DigestUpdate(mctx2, seed, sizeof(seed));
+    EVP_DigestFinalXOF(mctx2, out, out_len);
+    EVP_MD_CTX_free(mctx2);
+    EVP_MD_free(md2);
+
+    const BIGNUM* q = ring_modulus();
+    ring_elem* targets[7] = {&A1[0], &A1[1], &A1[2], d2, a2, b2, r};
+    for (int t = 0; t < 7; t++)
+    {
+        for (int c = 0; c < TIBE_D; c++)
+        {
+            BN_bin2bn(out + (size_t)t * rb + (size_t)c * TIBE_Q_BYTES, TIBE_Q_BYTES, targets[t]->coeffs[c]);
+            BN_nnmod(targets[t]->coeffs[c], targets[t]->coeffs[c], q, ctx);
+        }
+    }
+    free(out);
 }
 
 /* ── JSON helpers (minimal, matching shareholder.c's philosophy --
@@ -265,41 +418,476 @@ handler(void* cls, struct MHD_Connection* conn, const char* url, const char* met
         return send_json(conn, MHD_HTTP_OK, "{\"status\":\"alive\"}");
     }
 
-    /* POST /store_share -- {"x":N,"share_hex":"..."} */
-    if (strcmp(method, "POST") == 0 && strcmp(url, "/store_share") == 0)
+    /* POST /dkg_round1 -- {"my_index":N} -> {"pub_hex":"...","cmt_hex":"..."}
+     * Triggers this party's own local round-1 computation and sends
+     * every other party its private payload directly (peer-to-peer,
+     * not through the coordinator -- see file header comment). */
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/dkg_round1") == 0)
     {
-        int x = 0;
-        char* share_hex = NULL;
-        if (parse_json_int(rb->buf, "x", &x) != 0 || parse_json_string_dyn(rb->buf, "share_hex", &share_hex) != 0)
+        int my_index = -1;
+        if (parse_json_int(rb->buf, "my_index", &my_index) != 0 || my_index < 0 || my_index >= TIBE_N)
         {
-            free(share_hex);
+            return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"missing/bad my_index\"}");
+        }
+        g_my_index = my_index;
+
+        dkg_round1(&g_dkg_state, g_ctx);
+        dkg_pubkey_round1(&g_pk_state, g_my_index, g_pk_cmt, g_ctx);
+
+        size_t rd_bytes = V3S_RECIPIENT_DATA_SERIALIZED_BYTES;
+        uint8_t* rd_buf = malloc(rd_bytes);
+        char* rd_hex = malloc(2 * rd_bytes + 1);
+        for (int j = 0; j < TIBE_N; j++)
+        {
+            if (j == g_my_index)
+            {
+                continue;
+            }
+            v3s_recipient_data rd;
+            v3s_recipient_data_init(&rd);
+            dkg_round1_extract_recipient(&rd, &g_dkg_state, j);
+            v3s_recipient_data_serialize(rd_buf, &rd);
+            v3s_recipient_data_free(&rd);
+            hex_encode(rd_hex, rd_buf, rd_bytes);
+
+            size_t body_cap = 2 * rd_bytes + 2 * TIBE_SEED_BYTES + 2 * ring_serialized_bytes() + 256;
+            char* body = malloc(body_cap);
+            if (j > g_my_index)
+            {
+                RAND_bytes(g_pairseed_sent[j], TIBE_SEED_BYTES);
+                char pairseed_hex[2 * TIBE_SEED_BYTES + 1];
+                hex_encode(pairseed_hex, g_pairseed_sent[j], TIBE_SEED_BYTES);
+                size_t maskbytes = ring_serialized_bytes();
+                uint8_t* maskbuf = malloc(maskbytes);
+                ring_serialize(maskbuf, &g_pk_state.mask_to[j]);
+                char* mask_hex = malloc(2 * maskbytes + 1);
+                hex_encode(mask_hex, maskbuf, maskbytes);
+                free(maskbuf);
+                snprintf(body, body_cap, "{\"from\":%d,\"rdata_hex\":\"%s\",\"pairseed_hex\":\"%s\",\"b0mask_hex\":\"%s\"}",
+                         g_my_index, rd_hex, pairseed_hex, mask_hex);
+                free(mask_hex);
+            }
+            else
+            {
+                snprintf(body, body_cap, "{\"from\":%d,\"rdata_hex\":\"%s\"}", g_my_index, rd_hex);
+            }
+            long code = peer_post(g_peer_hosts[j], g_peer_port, "/dkg_receive", body);
+            free(body);
+            if (code != 200)
+            {
+                fprintf(stderr, "[tibe_sh x=%d] WARNING: /dkg_receive to peer %d returned %ld\n", g_my_index + 1, j,
+                        code);
+            }
+        }
+        free(rd_buf);
+        free(rd_hex);
+
+        size_t pub_bytes = V3S_PUBLIC_SERIALIZED_BYTES;
+        uint8_t* pub_buf = malloc(pub_bytes);
+        v3s_public_serialize(pub_buf, g_dkg_state.share.root, g_dkg_state.share.v_shares);
+        char* pub_hex = malloc(2 * pub_bytes + 1);
+        hex_encode(pub_hex, pub_buf, pub_bytes);
+        free(pub_buf);
+
+        char cmt_hex[2 * DKG_PUBKEY_CMT_BYTES + 1];
+        hex_encode(cmt_hex, g_pk_cmt, DKG_PUBKEY_CMT_BYTES);
+
+        char* resp = malloc(2 * pub_bytes + 256);
+        snprintf(resp, 2 * pub_bytes + 256, "{\"pub_hex\":\"%s\",\"cmt_hex\":\"%s\"}", pub_hex, cmt_hex);
+        free(pub_hex);
+        printf("[tibe_sh idx=%d] dkg_round1 done\n", g_my_index);
+        fflush(stdout);
+        return send_json_owned(conn, MHD_HTTP_OK, resp);
+    }
+
+    /* POST /dkg_receive -- {"from":N,"rdata_hex":"...","pairseed_hex":"...","b0mask_hex":"..."}
+     * (the last two only present when from < this party's own index)
+     * -> {"status":"ok"}. Peer-to-peer target, called by every other
+     * party once. */
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/dkg_receive") == 0)
+    {
+        int from = -1;
+        char* rdata_hex = NULL;
+        if (parse_json_int(rb->buf, "from", &from) != 0 || from < 0 || from >= TIBE_N ||
+            parse_json_string_dyn(rb->buf, "rdata_hex", &rdata_hex) != 0)
+        {
+            free(rdata_hex);
+            return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"missing fields\"}");
+        }
+        size_t rd_bytes = V3S_RECIPIENT_DATA_SERIALIZED_BYTES;
+        uint8_t* rd_buf = malloc(rd_bytes);
+        int ok = (strlen(rdata_hex) == 2 * rd_bytes) && hex_decode(rd_buf, rd_bytes, rdata_hex) == 0;
+        free(rdata_hex);
+        if (!ok)
+        {
+            free(rd_buf);
+            return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"bad rdata_hex\"}");
+        }
+        v3s_recipient_data_deserialize(&g_dkg_recv[from], rd_buf);
+        free(rd_buf);
+        g_dkg_recv_ready[from] = 1;
+
+        char* pairseed_hex = NULL;
+        if (parse_json_string_dyn(rb->buf, "pairseed_hex", &pairseed_hex) == 0)
+        {
+            hex_decode(g_pairseed_recv[from], TIBE_SEED_BYTES, pairseed_hex);
+            free(pairseed_hex);
+            g_pairseed_recv_ready[from] = 1;
+
+            char* mask_hex = NULL;
+            if (parse_json_string_dyn(rb->buf, "b0mask_hex", &mask_hex) == 0)
+            {
+                size_t maskbytes = ring_serialized_bytes();
+                uint8_t* maskbuf = malloc(maskbytes);
+                if (strlen(mask_hex) == 2 * maskbytes && hex_decode(maskbuf, maskbytes, mask_hex) == 0)
+                {
+                    ring_deserialize(&g_b0mask_recv[from], maskbuf);
+                    g_b0mask_recv_ready[from] = 1;
+                }
+                free(maskbuf);
+                free(mask_hex);
+            }
+        }
+        return send_json(conn, MHD_HTTP_OK, "{\"status\":\"ok\"}");
+    }
+
+    /* POST /dkg_round2 -- {"all_pub_hex":"...","all_cmt_hex":"..."}
+     * -> {"verdict_csv":"...","a0_hex":"...","d0_hex":"...","nonce_hex":"..."} */
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/dkg_round2") == 0)
+    {
+        char *all_pub_hex = NULL, *all_cmt_hex = NULL;
+        if (parse_json_string_dyn(rb->buf, "all_pub_hex", &all_pub_hex) != 0 ||
+            parse_json_string_dyn(rb->buf, "all_cmt_hex", &all_cmt_hex) != 0)
+        {
+            free(all_pub_hex);
+            free(all_cmt_hex);
+            return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"missing fields\"}");
+        }
+        size_t pub_bytes = V3S_PUBLIC_SERIALIZED_BYTES;
+        uint8_t* pub_chunk = malloc(pub_bytes);
+        char* pub_chunk_hex = malloc(2 * pub_bytes + 1);
+        for (int i = 0; i < TIBE_N; i++)
+        {
+            memcpy(pub_chunk_hex, all_pub_hex + (size_t)i * 2 * pub_bytes, 2 * pub_bytes);
+            pub_chunk_hex[2 * pub_bytes] = '\0';
+            hex_decode(pub_chunk, pub_bytes, pub_chunk_hex);
+            v3s_public_deserialize(g_dkg_pub[i].root, g_dkg_pub[i].v_shares, pub_chunk);
+            g_dkg_pub_ready[i] = 1;
+
+            char cmt_chunk[2 * DKG_PUBKEY_CMT_BYTES + 1];
+            memcpy(cmt_chunk, all_cmt_hex + (size_t)i * 2 * DKG_PUBKEY_CMT_BYTES, 2 * DKG_PUBKEY_CMT_BYTES);
+            cmt_chunk[2 * DKG_PUBKEY_CMT_BYTES] = '\0';
+            hex_decode(g_pk_cmts[i], DKG_PUBKEY_CMT_BYTES, cmt_chunk);
+        }
+        free(pub_chunk);
+        free(pub_chunk_hex);
+        free(all_pub_hex);
+        free(all_cmt_hex);
+
+        dkg_round2_verdicts my_verdicts;
+        dkg_round2(&my_verdicts, g_my_index, g_dkg_pub, g_dkg_recv, g_ctx);
+
+        char verdict_csv[4 * TIBE_N + 1];
+        {
+            char* p = verdict_csv;
+            for (int j = 0; j < TIBE_N; j++)
+            {
+                p += snprintf(p, 4, "%d%s", my_verdicts.verdict[j], (j + 1 < TIBE_N) ? "," : "");
+            }
+        }
+
+        size_t rb2 = ring_serialized_bytes();
+        uint8_t* a0buf = malloc(rb2);
+        uint8_t* d0buf = malloc(rb2);
+        ring_serialize(a0buf, &g_pk_state.a0_contrib);
+        ring_serialize(d0buf, &g_pk_state.d0_contrib);
+        char* a0hex = malloc(2 * rb2 + 1);
+        char* d0hex = malloc(2 * rb2 + 1);
+        hex_encode(a0hex, a0buf, rb2);
+        hex_encode(d0hex, d0buf, rb2);
+        free(a0buf);
+        free(d0buf);
+        char nonce_hex[2 * DKG_PUBKEY_NONCE_BYTES + 1];
+        hex_encode(nonce_hex, g_pk_state.nonce, DKG_PUBKEY_NONCE_BYTES);
+
+        char* resp = malloc(4 * rb2 + 512);
+        snprintf(resp, 4 * rb2 + 512, "{\"verdict_csv\":\"%s\",\"a0_hex\":\"%s\",\"d0_hex\":\"%s\",\"nonce_hex\":\"%s\"}",
+                 verdict_csv, a0hex, d0hex, nonce_hex);
+        free(a0hex);
+        free(d0hex);
+        printf("[tibe_sh idx=%d] dkg_round2 done\n", g_my_index);
+        fflush(stdout);
+        return send_json_owned(conn, MHD_HTTP_OK, resp);
+    }
+
+    /* POST /dkg_round3 -- {"all_verdicts_csv":"...","all_a0_hex":"...","all_d0_hex":"...","all_nonce_hex":"..."}
+     * -> {"b0_hex":"..."} */
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/dkg_round3") == 0)
+    {
+        char *all_verdicts_csv = NULL, *all_a0_hex = NULL, *all_d0_hex = NULL, *all_nonce_hex = NULL;
+        if (parse_json_string_dyn(rb->buf, "all_verdicts_csv", &all_verdicts_csv) != 0 ||
+            parse_json_string_dyn(rb->buf, "all_a0_hex", &all_a0_hex) != 0 ||
+            parse_json_string_dyn(rb->buf, "all_d0_hex", &all_d0_hex) != 0 ||
+            parse_json_string_dyn(rb->buf, "all_nonce_hex", &all_nonce_hex) != 0)
+        {
+            free(all_verdicts_csv);
+            free(all_a0_hex);
+            free(all_d0_hex);
+            free(all_nonce_hex);
             return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"missing fields\"}");
         }
 
-        size_t priv_bytes = threshold_share_private_serialized_bytes();
-        uint8_t* priv_buf = malloc(priv_bytes);
-        int ok = (strlen(share_hex) == 2 * priv_bytes) && hex_decode(priv_buf, priv_bytes, share_hex) == 0;
-        free(share_hex);
-        if (!ok)
         {
-            free(priv_buf);
-            return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"bad share_hex\"}");
+            int flat[TIBE_N * TIBE_N];
+            int n = parse_csv_ints(all_verdicts_csv, flat, TIBE_N * TIBE_N);
+            free(all_verdicts_csv);
+            if (n != TIBE_N * TIBE_N)
+            {
+                free(all_a0_hex);
+                free(all_d0_hex);
+                free(all_nonce_hex);
+                return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"bad all_verdicts_csv\"}");
+            }
+            for (int k = 0; k < TIBE_N; k++)
+            {
+                for (int j = 0; j < TIBE_N; j++)
+                {
+                    g_verdicts[k][j] = flat[k * TIBE_N + j];
+                }
+            }
+        }
+        dkg_round2_verdicts verdict_structs[TIBE_N];
+        for (int k = 0; k < TIBE_N; k++)
+        {
+            for (int j = 0; j < TIBE_N; j++)
+            {
+                verdict_structs[k].verdict[j] = g_verdicts[k][j];
+            }
+        }
+        dkg_compute_valid_set(g_valid, verdict_structs);
+
+        size_t rb2 = ring_serialized_bytes();
+        uint8_t* chunk = malloc(rb2);
+        char* chunk_hex = malloc(2 * rb2 + 1);
+        for (int i = 0; i < TIBE_N; i++)
+        {
+            memcpy(chunk_hex, all_a0_hex + (size_t)i * 2 * rb2, 2 * rb2);
+            chunk_hex[2 * rb2] = '\0';
+            hex_decode(chunk, rb2, chunk_hex);
+            ring_deserialize(&g_a0_reveal[i], chunk);
+
+            memcpy(chunk_hex, all_d0_hex + (size_t)i * 2 * rb2, 2 * rb2);
+            chunk_hex[2 * rb2] = '\0';
+            hex_decode(chunk, rb2, chunk_hex);
+            ring_deserialize(&g_d0_reveal[i], chunk);
+        }
+        free(chunk);
+        free(chunk_hex);
+        free(all_a0_hex);
+        free(all_d0_hex);
+
+        uint8_t nonce_chunk[2 * DKG_PUBKEY_NONCE_BYTES + 1];
+        uint8_t nonces[TIBE_N][DKG_PUBKEY_NONCE_BYTES];
+        for (int i = 0; i < TIBE_N; i++)
+        {
+            memcpy(nonce_chunk, all_nonce_hex + (size_t)i * 2 * DKG_PUBKEY_NONCE_BYTES, 2 * DKG_PUBKEY_NONCE_BYTES);
+            nonce_chunk[2 * DKG_PUBKEY_NONCE_BYTES] = '\0';
+            hex_decode(nonces[i], DKG_PUBKEY_NONCE_BYTES, (char*)nonce_chunk);
+        }
+        free(all_nonce_hex);
+
+        for (int i = 0; i < TIBE_N; i++)
+        {
+            g_valid_ab[i] = dkg_pubkey_verify_commit(g_pk_cmts[i], &g_a0_reveal[i], &g_d0_reveal[i], nonces[i]);
+        }
+        ring_elem* a0c[TIBE_N];
+        ring_elem* d0c[TIBE_N];
+        for (int i = 0; i < TIBE_N; i++)
+        {
+            a0c[i] = &g_a0_reveal[i];
+            d0c[i] = &g_d0_reveal[i];
+        }
+        dkg_pubkey_finalize_a0_d0(&g_a0, &g_d0, g_valid_ab, a0c, d0c, g_ctx);
+
+        /* g_share.share_s_a/share_e_a/d0 are already ring_init'd once
+         * at startup via threshold_share_init (main()). */
+        dkg_aggregate(&g_share.share_s_a, &g_share.share_e_a, g_valid, g_dkg_recv, g_ctx);
+        ring_copy(&g_share.d0, &g_d0);
+        g_share.x = g_my_index + 1;
+
+        ring_elem b0_contrib;
+        ring_init(&b0_contrib);
+        if (g_valid[g_my_index])
+        {
+            ring_elem* received_masks[TIBE_N];
+            for (int j = 0; j < TIBE_N; j++)
+            {
+                received_masks[j] = (j < g_my_index) ? &g_b0mask_recv[j] : NULL;
+            }
+            dkg_pubkey_b0_contribution(&b0_contrib, g_my_index, g_valid, &g_dkg_state.x, &g_a0, g_pk_state.mask_to,
+                                        received_masks, g_ctx);
         }
 
-        threshold_share_private_deserialize(&g_share, priv_buf);
-        free(priv_buf);
-        g_share.x = x;
-        g_share_ready = 1;
+        uint8_t* b0buf = malloc(rb2);
+        ring_serialize(b0buf, &b0_contrib);
+        ring_free(&b0_contrib);
+        char* b0hex = malloc(2 * rb2 + 1);
+        hex_encode(b0hex, b0buf, rb2);
+        free(b0buf);
 
-        printf("[tibe_sh x=%d] Stored threshold share\n", x);
+        char* resp = malloc(2 * rb2 + 64);
+        snprintf(resp, 2 * rb2 + 64, "{\"b0_hex\":\"%s\"}", b0hex);
+        free(b0hex);
+        printf("[tibe_sh idx=%d] dkg_round3 done\n", g_my_index);
+        fflush(stdout);
+        return send_json_owned(conn, MHD_HTTP_OK, resp);
+    }
+
+    /* POST /dkg_round4 -- {"all_b0_hex":"..."} -> {"status":"ok"} */
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/dkg_round4") == 0)
+    {
+        char* all_b0_hex = NULL;
+        if (parse_json_string_dyn(rb->buf, "all_b0_hex", &all_b0_hex) != 0)
+        {
+            return send_json(conn, MHD_HTTP_BAD_REQUEST, "{\"error\":\"missing fields\"}");
+        }
+        size_t rb2 = ring_serialized_bytes();
+        uint8_t* chunk = malloc(rb2);
+        char* chunk_hex = malloc(2 * rb2 + 1);
+        for (int i = 0; i < TIBE_N; i++)
+        {
+            memcpy(chunk_hex, all_b0_hex + (size_t)i * 2 * rb2, 2 * rb2);
+            chunk_hex[2 * rb2] = '\0';
+            hex_decode(chunk, rb2, chunk_hex);
+            ring_deserialize(&g_b0_contribs[i], chunk);
+        }
+        free(chunk);
+        free(chunk_hex);
+        free(all_b0_hex);
+
+        ring_elem* b0c[TIBE_N];
+        for (int i = 0; i < TIBE_N; i++)
+        {
+            b0c[i] = &g_b0_contribs[i];
+        }
+        dkg_pubkey_finalize_b0(&g_b0, g_valid, b0c, g_ctx);
+
+        ring_elem A1[3], d2, a2, b2, r;
+        ring_init(&A1[0]);
+        ring_init(&A1[1]);
+        ring_init(&A1[2]);
+        ring_init(&d2);
+        ring_init(&a2);
+        ring_init(&b2);
+        ring_init(&r);
+        derive_public_setup_material(A1, &d2, &a2, &b2, &r, g_ctx);
+
+        const BIGNUM* q = ring_modulus();
+        ring_elem one;
+        ring_init(&one);
+        ring_zero(&one);
+        BN_set_word(one.coeffs[0], 1);
+        ring_mul(&g_ek.A0[0], &one, &g_d0, g_ctx);
+        ring_mul(&g_ek.A0[1], &g_a0, &g_d0, g_ctx);
+        ring_mul(&g_ek.A0[2], &g_b0, &g_d0, g_ctx);
+        ring_copy(&g_ek.A1[0], &A1[0]);
+        ring_copy(&g_ek.A1[1], &A1[1]);
+        ring_copy(&g_ek.A1[2], &A1[2]);
+        ring_mul(&g_ek.A2[0], &one, &d2, g_ctx);
+        ring_mul(&g_ek.A2[1], &a2, &d2, g_ctx);
+        ring_mul(&g_ek.A2[2], &b2, &d2, g_ctx);
+        ring_copy(&g_ek.r, &r);
+        ring_free(&one);
+        ring_free(&d2);
+        ring_free(&a2);
+        ring_free(&b2);
+        ring_free(&r);
+        ring_free(&A1[0]);
+        ring_free(&A1[1]);
+        ring_free(&A1[2]);
+
+        ring_elem g_elem, one2;
+        ring_init(&g_elem);
+        ring_init(&one2);
+        BIGNUM* g_bn = BN_new();
+        tibe_compute_g(g_bn, q, g_ctx);
+        BN_copy(g_elem.coeffs[0], g_bn);
+        BN_free(g_bn);
+        ring_zero(&one2);
+        BN_set_word(one2.coeffs[0], 1);
+        ring_copy(&g_ek.G[0], &one2);
+        ring_copy(&g_ek.G[1], &g_elem);
+        ring_mul(&g_ek.G[2], &g_elem, &g_elem, g_ctx);
+        ring_free(&g_elem);
+        ring_free(&one2);
+
+        for (int j = 0; j < TIBE_N; j++)
+        {
+            if (j == g_my_index)
+            {
+                continue;
+            }
+            if (j > g_my_index)
+            {
+                memcpy(g_share.pairwise_seed[j], g_pairseed_sent[j], TIBE_SEED_BYTES);
+            }
+            else
+            {
+                memcpy(g_share.pairwise_seed[j], g_pairseed_recv[j], TIBE_SEED_BYTES);
+            }
+        }
+
+        g_ek_ready = 1;
+        g_share_ready = 1;
+        g_setup_done = 1;
+
+        printf("[tibe_sh idx=%d] dkg_round4 done -- fully dealer-free setup complete, x=%d\n", g_my_index,
+               g_share.x);
         fflush(stdout);
         return send_json(conn, MHD_HTTP_OK, "{\"status\":\"ok\"}");
+    }
+
+    /* GET /dkg_get_public -> {"ek_hex":"...","d0_hex":"..."}
+     * Queried once by tibe_dealer.c after every shareholder finishes
+     * dkg_round4, purely so tibe_coordinator.c (unchanged from Phase
+     * 7) still has a shared-volume file to read ek/d0 from -- ek/d0
+     * are public regardless of how they were generated (see
+     * tibe_dealer.c's own comment), so writing them to a shared file
+     * once finalized is not a weaker trust model than before. Any
+     * shareholder can answer this identically, since every honest
+     * party computes the same ek from the same public broadcast
+     * data. */
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/dkg_get_public") == 0)
+    {
+        if (!g_setup_done)
+        {
+            return send_json(conn, MHD_HTTP_CONFLICT, "{\"error\":\"setup not complete\"}");
+        }
+        size_t ek_bytes = tibe_ek_serialized_bytes();
+        uint8_t* ek_buf = malloc(ek_bytes);
+        tibe_ek_serialize(ek_buf, &g_ek);
+        char* ek_hex = malloc(2 * ek_bytes + 1);
+        hex_encode(ek_hex, ek_buf, ek_bytes);
+        free(ek_buf);
+
+        size_t rb2 = ring_serialized_bytes();
+        uint8_t* d0buf = malloc(rb2);
+        ring_serialize(d0buf, &g_d0);
+        char* d0hex = malloc(2 * rb2 + 1);
+        hex_encode(d0hex, d0buf, rb2);
+        free(d0buf);
+
+        char* resp = malloc(2 * ek_bytes + 2 * rb2 + 64);
+        snprintf(resp, 2 * ek_bytes + 2 * rb2 + 64, "{\"ek_hex\":\"%s\",\"d0_hex\":\"%s\"}", ek_hex, d0hex);
+        free(ek_hex);
+        free(d0hex);
+        return send_json_owned(conn, MHD_HTTP_OK, resp);
     }
 
     /* POST /round0 -- {"ct_hex":"..."} -> {"cmt_hex":"..."} */
     if (strcmp(method, "POST") == 0 && strcmp(url, "/round0") == 0)
     {
-        if (!g_share_ready || !ensure_ek_loaded())
+        if (!g_share_ready || !g_ek_ready)
         {
             return send_json(conn, MHD_HTTP_CONFLICT, "{\"error\":\"not ready\"}");
         }
@@ -522,6 +1110,50 @@ main(int argc, char* argv[])
     tibe_ek_init(&g_ek);
     tkem_ct_init(&g_ct);
     threshold_round0_state_init(&g_round0_state);
+
+    /* Phase 8d: peer hostnames (for the direct peer-to-peer /dkg_receive
+     * calls, see file header comment) and per-global-array init --
+     * every ring_elem this file deserializes/zeros into via the DKG
+     * handlers must already have its BIGNUM coefficients allocated
+     * (ring_init / *_init), or those calls dereference NULL. */
+    const char* hosts_str = getenv("TIBE_SHAREHOLDER_HOSTS");
+    const char* peer_port_str = getenv("TIBE_SHAREHOLDER_PORT");
+    g_peer_port = peer_port_str ? atoi(peer_port_str) : port;
+    const char* hosts_csv =
+        hosts_str ? hosts_str : "tsh1,tsh2,tsh3,tsh4,tsh5,tsh6,tsh7,tsh8,tsh9,tsh10";
+    {
+        char tmp[2048];
+        strncpy(tmp, hosts_csv, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        g_n_hosts = 0;
+        char* tok = strtok(tmp, ",");
+        while (tok && g_n_hosts < TIBE_N)
+        {
+            strncpy(g_peer_hosts[g_n_hosts], tok, sizeof(g_peer_hosts[0]) - 1);
+            g_peer_hosts[g_n_hosts][sizeof(g_peer_hosts[0]) - 1] = '\0';
+            g_n_hosts++;
+            tok = strtok(NULL, ",");
+        }
+        if (g_n_hosts != TIBE_N)
+        {
+            fprintf(stderr, "[tibe_shareholder] WARNING: expected %d peer hosts, got %d\n", TIBE_N, g_n_hosts);
+        }
+    }
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    dkg_pubkey_round1_init(&g_pk_state);
+    for (int i = 0; i < TIBE_N; i++)
+    {
+        dkg_public_share_init(&g_dkg_pub[i]);
+        v3s_recipient_data_init(&g_dkg_recv[i]);
+        ring_init(&g_a0_reveal[i]);
+        ring_init(&g_d0_reveal[i]);
+        ring_init(&g_b0mask_recv[i]);
+        ring_init(&g_b0_contribs[i]);
+    }
+    ring_init(&g_a0);
+    ring_init(&g_d0);
+    ring_init(&g_b0);
 
     struct MHD_Daemon* d =
         MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD, (uint16_t)port, NULL, NULL, handler, NULL,

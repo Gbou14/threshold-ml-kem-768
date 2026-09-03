@@ -98,6 +98,11 @@ void tibe_msk_free(tibe_msk* msk);
 void tibe_ct_init(tibe_ct* ct);
 void tibe_ct_free(tibe_ct* ct);
 
+/* g := floor(q^{1/3}), a deterministic function of q alone -- every
+ * party can compute G := [1,g,g^2] independently with zero
+ * coordination (Phase 8d's fully-dealer-free Setup). */
+void tibe_compute_g(BIGNUM* g_out, const BIGNUM* q, BN_CTX* ctx);
+
 /* 1 if every ring element of a and b (all 9 u's and v) is equal, 0
  * otherwise -- needed by tkem.c's FO-style re-encryption check
  * (TKEM.Combine asserts ct == TIBE.Encrypt(ek,vk,msg;rand)). */

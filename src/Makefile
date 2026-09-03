@@ -16,7 +16,8 @@ KYBER_HDRS = $(wildcard kyber/*.h)
 # one, and the two demos (dealer/shareholder/coordinator vs
 # tibe_dealer/tibe_shareholder/tibe_coordinator) are independent.
 TIBE_SRCS = tibe/ring.c tibe/gauss.c tibe/tibe.c tibe/wots.c tibe/identity.c \
-            tibe/threshold.c tibe/tkem.c
+            tibe/threshold.c tibe/tkem.c tibe/merkle.c tibe/v3s.c tibe/dkg.c \
+            tibe/dkg_pubkey.c
 TIBE_OBJS = $(TIBE_SRCS:.c=.o)
 TIBE_HDRS = $(wildcard tibe/*.h)
 
@@ -41,7 +42,7 @@ test_openssl: test_openssl.c
 	$(CC) $(CFLAGS) -o $@ $< $(LD_SSL)
 
 tibe_shareholder: tibe_shareholder.c hexutil.c $(TIBE_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LD_SH) $(LD_SSL) $(LD_MATH)
+	$(CC) $(CFLAGS) -o $@ $^ $(LD_SH) $(LD_CURL) $(LD_SSL) $(LD_MATH)
 
 tibe_dealer: tibe_dealer.c hexutil.c $(TIBE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LD_CURL) $(LD_SSL) $(LD_MATH)

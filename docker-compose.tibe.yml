@@ -17,18 +17,28 @@
 # "Performance". N_TRIALS defaults to 1 here, not the Kyber demo's
 # 200. Budget real time to run this, not seconds.
 #
-# Startup order:
-#   1. tsh1..tsh10 start (shareholder HTTP servers) -- they answer
-#      /health immediately, then lazily wait for the dealer's ek/d0 on
-#      the shared volume the first time /round0 is called (can't
-#      block on it at startup without deadlocking the dealer's own
-#      wait-for-healthy loop)
-#   2. tibe_dealer   runs TKEM.Keygen (TIBE.Setup), Shamir-shares
-#                    (s_a,e_a) across all 10 parties, sends each
-#                    shareholder its own private share over HTTP, and
-#                    writes ek + d0 (not secret-shared, see
-#                    src/tibe/tibe.h's tibe_msk comment) to
-#                    ./data/tibe_ek.bin / ./data/tibe_d0.bin
+# Startup order (Phase 8d: fully dealer-free setup -- see
+# BCHK_TODO.md Phase 8d and tibe_shareholder.c/tibe_dealer.c's own
+# header comments for the full protocol):
+#   1. tsh1..tsh10 start (shareholder HTTP servers), answer /health
+#      immediately.
+#   2. tibe_dealer orchestrates a 4-round distributed setup across all
+#      10 shareholders (dkg_round1..dkg_round4) -- it relays only
+#      PUBLIC broadcast data between rounds (roots, v_shares, a0/d0
+#      commitments/reveals, verdict vectors, b0 contributions); every
+#      shareholder's PRIVATE per-recipient V3S share data goes
+#      *directly* shareholder-to-shareholder instead (POST
+#      /dkg_receive), bypassing tibe_dealer entirely -- if it saw that
+#      private data it would have enough Shamir shares to reconstruct
+#      every party's secret itself. tibe_dealer never sees, computes,
+#      or holds (s_a,e_a), a0, d0, or b0, at any point. Once every
+#      shareholder finishes locally computing its own copy of ek
+#      (identical across all of them, since it's a pure function of
+#      the same public broadcast data), tibe_dealer fetches ek/d0
+#      (both public regardless of how they were generated) from one
+#      shareholder and writes them to ./data/tibe_ek.bin /
+#      ./data/tibe_d0.bin purely so tibe_coordinator (unchanged) has
+#      somewhere to read them from.
 #   3. tibe_coordinator  runs N_TRIALS (default 1) of: real
 #                    tkem_encaps -> round0 (collect commitments from
 #                    the 5-party active set) -> round1 (collect
@@ -38,8 +48,10 @@
 #                    directly from the shared secret. Writes results
 #                    to ./data/tibe_results.csv
 #
-# No party, including the dealer after it exits, ever holds (s_a,e_a)
-# again -- only individual Shamir shares exist from that point on.
+# No party, ever, at any point in setup or decapsulation, forms
+# (s_a,e_a) -- not even transiently, not even the dealer. This is a
+# genuinely stronger guarantee than Phase 7's "the dealer discards it
+# after exiting" -- see BCHK_TODO.md Phase 8d.
 #
 # Running it:
 #   docker compose -f docker-compose.tibe.yml up -d
@@ -73,8 +85,12 @@ x-tsh-base: &tsh-base
   networks: [tibe-net]
   command: ["./tibe_shareholder", "8080"]
   expose: ["8080"]
-  volumes:
-    - ./data:/data # read-only in practice: only tibe_ek.bin/tibe_d0.bin, written by tibe_dealer
+  environment:
+    # Phase 8d: every shareholder now needs to know its peers too, for
+    # the direct peer-to-peer /dkg_receive calls in dkg_round1 -- not
+    # just the dealer/coordinator, unlike Phase 7.
+    TIBE_SHAREHOLDER_HOSTS: "tsh1,tsh2,tsh3,tsh4,tsh5,tsh6,tsh7,tsh8,tsh9,tsh10"
+    TIBE_SHAREHOLDER_PORT: "8080"
   restart: "no"
 
 services:
@@ -121,7 +137,7 @@ services:
     container_name: tsh10
     hostname: tsh10
 
-  # ── Dealer ────────────────────────────────────────────────────────────────
+  # ── Setup orchestrator (never sees a secret -- see tibe_dealer.c) ─────────
   tibe_dealer:
     build: .
     container_name: tibe_dealer

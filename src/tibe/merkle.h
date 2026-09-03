@@ -68,4 +68,12 @@ void merkle_proof_generate(merkle_proof* proof, const merkle_tree* t, int leaf_i
 int merkle_proof_verify(const uint8_t root[MERKLE_HASH_BYTES], const uint8_t leaf[MERKLE_HASH_BYTES], int leaf_index,
                          int n_leaves, const merkle_proof* proof);
 
+/* Fixed-width (1 + MERKLE_MAX_DEPTH*MERKLE_HASH_BYTES bytes,
+ * self-describing via the leading depth byte) wire-format
+ * serialization -- Phase 8d's Docker wiring needs to send a proof
+ * over HTTP, unlike this module's earlier in-process-only use. */
+#define MERKLE_PROOF_SERIALIZED_BYTES (1 + MERKLE_MAX_DEPTH * MERKLE_HASH_BYTES)
+void merkle_proof_serialize(uint8_t out[MERKLE_PROOF_SERIALIZED_BYTES], const merkle_proof* proof);
+void merkle_proof_deserialize(merkle_proof* proof, const uint8_t in[MERKLE_PROOF_SERIALIZED_BYTES]);
+
 #endif /* TIBE_MERKLE_H */

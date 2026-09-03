@@ -18,9 +18,14 @@ ring_set_word_const(ring_elem* out, unsigned long value, BN_CTX* ctx)
 /* floor(q^{1/3}) via binary search -- q is ~101 bits, so the search
  * space (candidate g values) is only ~34 bits; a handful of BN_sqr/
  * BN_mul calls per iteration is negligible next to this module's
- * O(D^2) ring operations. */
-static void
-compute_g(BIGNUM* g_out, const BIGNUM* q, BN_CTX* ctx)
+ * O(D^2) ring operations. Exposed (not static) since Phase 8d's
+ * fully-dealer-free Setup needs every party to independently compute
+ * the same G := [1,g,g^2] with zero coordination -- g is a pure,
+ * deterministic function of q, "a fixed public constant, not random"
+ * (see tibe_setup's own G-construction comment), so this needs no
+ * distributed-generation protocol at all, unlike a0/d0/A1/A2/r. */
+void
+tibe_compute_g(BIGNUM* g_out, const BIGNUM* q, BN_CTX* ctx)
 {
     BIGNUM* lo = BN_new();
     BIGNUM* hi = BN_new();
@@ -334,7 +339,7 @@ tibe_setup(tibe_ek* ek, tibe_msk* msk, BN_CTX* ctx)
 
     /* G := [1, g, g^2], g ~ q^{1/3} (a fixed public constant, not random) */
     BIGNUM* g_bn = BN_new();
-    compute_g(g_bn, q, ctx);
+    tibe_compute_g(g_bn, q, ctx);
     BN_copy(g_elem.coeffs[0], g_bn);
     ring_copy(&ek->G[0], &one);
     ring_copy(&ek->G[1], &g_elem);
