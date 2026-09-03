@@ -1,4 +1,4 @@
-# TIBE / BCHK+ threshold KEM (Phase 1-7: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding, the real threshold protocol, the BCHK+ TKEM layer, live Docker demo)
+# TIBE / BCHK+ threshold KEM (Phase 1-8a/8b: ring arithmetic, Gaussian sampling, WOTS+, TIBE core algebra, identity embedding, the real threshold protocol, the BCHK+ TKEM layer, live Docker demo, below-threshold/malicious-party testing, an exact Gaussian sampler)
 
 This module is the from-scratch implementation of Lapiha & Prest, "A
 Lattice-Based IND-CCA Threshold KEM from the BCHK+ Transform" (Asiacrypt
@@ -113,13 +113,13 @@ exactly. No distributed key generation exists in either scheme.
   splitting isomorphism (`ring_split`/`ring_unsplit`/`field_mul`/
   `field_elem`) -- see "Identity embedding" below. See "Why BIGNUM"
   below for the module's general BIGNUM-vs-fixed-width rationale.
-- `gauss.c`/`.h` -- discrete-Gaussian-*approximating* sampling at an
-  arbitrary width. See "Gaussian sampling" below for the approximation
-  this makes and why. New this phase: a deterministic ("derandomized")
-  sampling path (`gauss_prg`/`gauss_sample_from_prg`) drawing from a
-  pre-squeezed SHAKE-256 stream instead of `RAND_bytes`, needed for the
+- `gauss.c`/`.h` -- exact discrete Gaussian sampling (CDT for the two
+  small widths, a Micciancio-Walter convolution construction for the
+  two huge ones -- see "Gaussian sampling" below), over either
+  `RAND_bytes` or a deterministic ("derandomized") pre-squeezed
+  SHAKE-256 stream (`gauss_prg`/`gauss_sample_from_prg`, needed for the
   BCHK+ TKEM's FO-style derandomized `Encaps` -- see "The BCHK+ TKEM
-  layer" below.
+  layer" below). Replaced a Box-Muller approximation in Phase 8b.
 - `wots.c`/`.h` -- WOTS+, the one-time signature the BCHK+ transform
   binds to each fresh TIBE ciphertext. See "WOTS+" below.
 - `tibe.c`/`.h` -- the TIBE core algebra: `Setup` (non-threshold, Phase
@@ -225,22 +225,100 @@ Distribution, trivial to sample in constant time from raw random bytes);
 an *exact*, constant-time discrete Gaussian sampler (rejection sampling,
 a cumulative-distribution table, or a convolution-based construction) is
 real, separate cryptographic engineering with its own precision and
-side-channel pitfalls, and is explicitly **not** what this module does.
+side-channel pitfalls.
 
-`gauss_sample_coeff` instead draws two uniform doubles from OpenSSL
-`RAND_bytes` (53 bits of resolution each, matching the rest of this
-project's reliance on OpenSSL's CSPRNG), runs the standard Box-Muller
-transform to get a continuous standard-normal sample, scales by `sigma`,
-and rounds to the nearest integer. This is a widely-used *practical
-approximation* of a discrete Gaussian, not the paper's formal object --
-it is not proven statistically close to `D_{R,sigma}` the way a real
-discrete Gaussian sampler would be, and it is not constant-time (`log`,
-`cos`, `sqrt` and double-precision rounding all have data-dependent
-timing on typical hardware). Good enough to validate the *algebra* of
-later phases (does noise-flooding correctness hold, does `Decode` round
-correctly), not good enough to make a security claim about the resulting
-system without replacing it. Flagged here, in `BCHK_PAPER_SPEC.md` open
-question #2, and in `BCHK_TODO.md` so it isn't forgotten.
+**Through Phase 8a**, `gauss_sample_coeff` drew two uniform doubles from
+OpenSSL `RAND_bytes`, ran the standard Box-Muller transform to get a
+continuous standard-normal sample, scaled by `sigma`, and rounded to the
+nearest integer -- a widely-used *practical approximation* of a discrete
+Gaussian, not the paper's formal object, and not constant-time (`log`,
+`cos`, `sqrt` all have data-dependent timing on typical hardware). Good
+enough to validate the *algebra* of Phases 1-7 (does noise-flooding
+correctness hold, does `Decode` round correctly), explicitly flagged as
+not good enough to make a security claim about the resulting system.
+
+**Phase 8b** replaces it with an exact sampler, in two pieces:
+
+**Small widths (`TIBE_SIGMA=4`, `TIBE_SIGMA_A=8`): an exact
+cumulative-distribution table (CDT).** Built once per distinct sigma
+(and cached, same lazy-static-global convention `ring.c`'s
+`ring_modulus()` already uses for `q`, `r1`, `r2`) via 256-bit
+fixed-point BIGNUM arithmetic: an exact `exp(-y)` via standard range
+reduction (`y = n*ln(2) + r`, `0 <= r < ln(2)`, both computed by their
+own fast-converging fixed-point series) times a `2^-n` bit shift --
+numerically robust, unlike e.g. `erf`'s slowly-converging, cancellation-
+prone series at large arguments, which is why this samples the PMF
+directly (`rho(k) = exp(-k^2/(2*sigma^2))`) rather than inverting a CDF.
+The table covers `k` in `[-tau*sigma, tau*sigma]` for `tau=15`
+(`GAUSS_TAU` in `gauss.c`) and is renormalized to sum to exactly 1 over
+that truncated range -- the resulting truncation error is the dominant
+source of statistical distance from the true (untruncated) discrete
+Gaussian, bounded by the standard Gaussian tail estimate at
+`~2*exp(-tau^2/2)` per coefficient, which even after a union bound over
+one ring element's `TIBE_D=4096` coefficients is about `2^-150` --
+comfortably negligible. Every *sample* (not table build, which is a
+one-time, public-parameter computation with no timing sensitivity) does
+a full, un-early-exited linear scan over all table entries, so the
+number of iterations and memory locations touched depends only on the
+(public) `sigma`, not on the drawn value.
+
+**Huge widths (`TIBE_SIGMA_PRIME=2^19`, `TIBE_SIGMA_P=2^47`): built from
+the small CDT via Micciancio & Walter's convolution theorem** ("Gaussian
+Sampling over the Integers: Efficient, Generic, Constant-Time," CRYPTO
+2017 / eprint 2017/259, Theorem 2.1, itself building on Peikert's
+original convolution theorem). A CDT table directly at `sigma=2^47`
+is infeasible (it would need on the order of `sigma` entries). Instead:
+if `x1, x2` are independent draws of width `s` and `s >= sqrt(2)*|k|*
+eta_eps(Z)` (`eta_eps(Z) < 6` for `eps <= 2^-160`, per that paper),
+then `k*x1 + x2` is statistically close to `D_{Z, s*sqrt(k^2+1)}` for
+any integer `k` respecting that bound. Starting from an internal base
+width of 16 (`GAUSS_CONV_BASE_SIGMA`, chosen with ~1.9x margin above the
+`sqrt(2)*6 ~ 8.49` minimum) and greedily maximizing `k` at each step
+(capped by that bound, which itself grows with the current width), the
+achievable width grows roughly *quadratically* per combination level --
+reaching `2^47` takes only ~7 levels (`gauss_build_schedule` in
+`gauss.c` derives the exact integer schedule at runtime, per target
+sigma, and caches it), i.e. a binary tree of depth 7 needing only
+`2^7=128` base-CDT draws total, not the `(2^47/16)^2` a naive
+fixed-coefficient sum would need. `TIBE_SIGMA_PRIME=2^19` needs only
+~5 levels (32 base draws). The schedule is tuned at its last level to
+land within about 1% of the target width, never under it (more
+blinding noise is conservative for the flooding/hiding property this
+width exists for; the params.h derivation already notes `2^19` clears
+Theorem 3's correctness *lower* bound with comfortable margin, so a ~1%
+overshoot doesn't threaten correctness either).
+
+**Overall statistical-distance accounting** (see `gauss.c`'s own
+comments for the per-piece numbers): CDT truncation dominates, at about
+`2^-150` per ring-element sample of a direct-CDT width and about
+`2^-140` for a convolution-built width (more leaf draws, each
+individually well below that bound); the fixed-point table-construction
+precision (256 bits) and the convolution theorem's own approximation
+term (bounded by the `eps=2^-160` `eta_eps(Z)` choice, accumulated over
+~7 levels) are both far smaller still. This is a computed, documented
+bound for a solo research implementation, not a formal, independently
+audited security proof -- flagged honestly, same posture as everywhere
+else in this project.
+
+**What "constant-time" does and doesn't mean here**, carried over
+explicitly from the design decision above: a fixed, sigma-determined
+(i.e. determined by a *public* parameter) number of loop iterations and
+memory accesses in this module's own C code, with no data-dependent
+branch on the *sampled value* or *drawn randomness*. It has **not** been
+verified against microarchitectural side channels with a dedicated tool
+(e.g. ctgrind, dudect) -- genuinely out of scope for a solo research
+project without specialized tooling, and a real, honestly-flagged
+limitation rather than a claim this module doesn't back up.
+
+Validated in `test/test_gauss.c`: the same empirical mean/stddev checks
+the Box-Muller version used, at all four widths, over both the
+`RAND_bytes` and `gauss_prg`-driven paths; plus (new, since sampling is
+now exact rather than approximate) a direct empirical-PMF-vs-theoretical
+-PMF goodness-of-fit check for the two direct-CDT widths, comparing this
+module's BIGNUM fixed-point `exp` against an independently-computed
+plain-double `exp` -- a check Box-Muller's continuous approximation
+couldn't meaningfully support. See `BCHK_TODO.md` Phase 8b for the
+before/after performance numbers.
 
 ## WOTS+
 
@@ -250,8 +328,9 @@ parameter `w=16`, all four internal hash functions (the chain function
 `f`, the seed-expanding `PRF`, and the message/key-compressing
 `H_msg`/`H_key`) instantiated as SHA2-256 with a distinct one-byte
 domain-separation prefix each (`toByte(0..3, 32)` -- 31 zero bytes then
-the constant). Unlike the Gaussian sampler, there's no approximation
-here: this is implemented exactly as specified, and the derived
+the constant). This is implemented exactly as specified (written when
+the Gaussian sampler was still the Box-Muller approximation Phase 8b
+later replaced -- WOTS+ never had that caveat), and the derived
 parameters (`l1=64` message digits, `l2=3` checksum digits, `l=67`
 chains, 2144-byte signatures) match the paper's stated figure exactly,
 which is itself a small internal-consistency check that the
@@ -529,16 +608,20 @@ TIBE.Setup`, no TKEM-specific work); the interesting pieces are
 (`s`, `e[9]`, `e'`) directly from `RAND_bytes` via `gauss_sample`, with
 no way to reproduce the same ciphertext twice. `tibe_encrypt_derand`
 takes an explicit 32-byte seed instead, expands it via one large
-SHAKE-256 squeeze (`gauss_prg`, `~700 KiB` for the 11 ring elements'
-worth of Box-Muller draws this needs) into a deterministic byte
-stream, and draws every random value from that stream instead
-(`gauss_sample_from_prg`) -- refactored to share the same Box-Muller
-core as the original `RAND_bytes`-driven path (`gauss.c`), so the two
-entry points can't silently drift apart. Validated two ways: the
-existing `gauss_sample`/`gauss_sample_coeff` statistical checks still
-pass unchanged (confirming the refactor didn't perturb the original
-path), a new statistical check on the `gauss_prg` path at
-`TIBE_SIGMA` (`test_gauss.c`), and, most directly, `test_tibe.c`'s
+SHAKE-256 squeeze (`gauss_prg`) into a deterministic byte stream, and
+draws every random value from that stream instead
+(`gauss_sample_from_prg`) -- sharing the same sampler (originally
+Box-Muller, now the exact CDT/convolution sampler from Phase 8b) as the
+original `RAND_bytes`-driven path (`gauss.c`), so the two entry points
+can't silently drift apart. The `gauss_prg` byte budget itself is no
+longer a flat per-element figure (Phase 8b: direct-CDT widths need 32
+bytes/coefficient, the convolution-built `TIBE_SIGMA_PRIME` needs far
+more) -- `tibe_encrypt_derand` computes it via `gauss_bytes_per_coeff`
+rather than a hardcoded constant; see "Gaussian sampling" above.
+Validated two ways: the existing `gauss_sample`/`gauss_sample_coeff`
+statistical checks still pass unchanged (confirming the refactor didn't
+perturb the original path), a new statistical check on the `gauss_prg`
+path at `TIBE_SIGMA` (`test_gauss.c`), and, most directly, `test_tibe.c`'s
 full `Setup`->`Encrypt`->`Decrypt` suite re-run and re-passing end to
 end now that `tibe_encrypt` routes through the derandomized path
 internally.
@@ -600,6 +683,36 @@ dominated by exactly one `Encrypt` call (a couple of minutes, not the
 threshold protocol's tens of minutes) -- WOTS+ sign/verify itself is
 negligible next to the ring arithmetic.
 
+**Phase 8b's exact sampler, measured against the numbers above**: a
+full re-run of every test binary (`test_ring` through `test_tkem`)
+after replacing Box-Muller confirms the same correctness (all pass)
+at a real but modest slowdown, since a CDT lookup (many cheap integer
+compares) or a convolution draw (a shallow tree of CDT lookups) does
+genuinely more work than one `log`/`cos` call, even though both are
+tiny next to this module's dominant cost (`ring_mul`/`ring_inv`):
+
+| test | before 8b | after 8b |
+| --- | --- | --- |
+| `test_gauss` | (near-instant) | 14s |
+| `test_tibe` (Setup+Encrypt+Decrypt) | ~9-10 min | 20m29s |
+| `test_threshold` (incl. Phase 8a's gap-closing checks) | ~47.5 min | 57m44s |
+| `test_tkem` (Keygen->Encaps->ShareDecaps->Combine) | ~30 min | 34m15s |
+
+`test_tibe` shows the largest relative jump (roughly 2x) since `Setup`
+and `Encrypt` are proportionally more Gaussian-sampling-heavy than the
+threshold/TKEM tests, where `ring_mul`/`ring_inv` cost dominates even
+more heavily and the sampler's slice of the total is smaller. Notably,
+sampling the two huge widths (`TIBE_SIGMA_PRIME=2^19`,
+`TIBE_SIGMA_P=2^47`) turned out cheap in absolute terms despite going
+through a 5-7-level convolution tree per coefficient -- `test_gauss`'s
+own huge-width checks (5000 samples each, `check_stats`) complete in a
+few seconds -- confirming the convolution construction's whole point
+(logarithmically many cheap base draws, not a naive
+quadratic-in-sigma cost) actually pays off in practice, not just in the
+asymptotic argument. This keeps NTT-based ring multiplication (still
+unimplemented) the dominant remaining performance lever, not the
+Gaussian sampler -- see `BCHK_TODO.md` phase 8's note on this.
+
 ## Validation
 
 No public reference implementation of this scheme exists anywhere (this
@@ -626,12 +739,15 @@ of a byte-exact diff.
   close to it); the sparse identity/zero/wraparound checks and the
   split/unsplit round-trip/additive checks are much faster in
   practice (the latter are only O(d), not O(d^2)).
-- `test_gauss`: empirical mean/stddev checks (20,000 samples each) at
-  every width this project's Table 2 instantiation actually uses
-  (`TIBE_SIGMA_A=8`, `TIBE_SIGMA=4`, `TIBE_SIGMA_P=2^47`), with
-  tolerances chosen so the check has a wide margin against a passing
-  distribution's own sampling noise (see the file for the exact
-  numbers) while still catching a genuinely broken sampler.
+- `test_gauss`: empirical mean/stddev checks at all four widths this
+  project's Table 2 instantiation uses (`TIBE_SIGMA_A=8`, `TIBE_SIGMA=4`,
+  `TIBE_SIGMA_PRIME=2^19`, `TIBE_SIGMA_P=2^47`), on both the
+  `RAND_bytes`- and `gauss_prg`-driven paths, with tolerances chosen so
+  the check has a wide margin against a passing distribution's own
+  sampling noise (see the file for the exact numbers) while still
+  catching a genuinely broken sampler; plus, since Phase 8b, a direct
+  empirical-PMF-vs-theoretical-PMF goodness-of-fit check at the two
+  direct-CDT widths (see "Gaussian sampling" above).
 - `test_wots`: sign-then-verify round trips (including an empty
   message), and that Verify reliably rejects a tampered message, a
   tampered signature byte, and a valid signature checked against the

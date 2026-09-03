@@ -373,10 +373,6 @@ build_f_vk(ring_elem f_vk[9], const tibe_ek* ek, const ring_elem* id, BN_CTX* ct
     ring_free(&id_g);
 }
 
-/* 11 ring elements' worth of Box-Muller draws (s + e[9] + e'), 16
- * bytes (two 8-byte uniform01 draws) per coefficient. */
-#define TIBE_ENCRYPT_PRG_BYTES ((size_t)11 * TIBE_D * 16)
-
 void
 tibe_encrypt_derand(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const uint8_t msg[TIBE_MSG_BYTES],
                      const uint8_t seed[TIBE_ENCRYPT_SEED_BYTES], BN_CTX* ctx)
@@ -388,8 +384,15 @@ tibe_encrypt_derand(tibe_ct* ct, const tibe_ek* ek, const ring_elem* id, const u
     }
     build_f_vk(f_vk, ek, id, ctx);
 
+    /* 8 ring elements at TIBE_SIGMA (s, e[0..2], e[6..8], e') + 3 at
+     * TIBE_SIGMA_PRIME (e[3..5]) -- per-coefficient byte cost varies by
+     * width since Phase 8b (CDT for small widths, up to 32*2^levels
+     * for the convolution-built TIBE_SIGMA_PRIME), unlike the old
+     * Box-Muller sampler's flat 16-bytes-per-coefficient. */
+    size_t prg_bytes =
+        (size_t)TIBE_D * (8 * gauss_bytes_per_coeff(TIBE_SIGMA) + 3 * gauss_bytes_per_coeff(TIBE_SIGMA_PRIME));
     gauss_prg prg;
-    gauss_prg_init(&prg, seed, TIBE_ENCRYPT_SEED_BYTES, TIBE_ENCRYPT_PRG_BYTES);
+    gauss_prg_init(&prg, seed, TIBE_ENCRYPT_SEED_BYTES, prg_bytes);
 
     /* s <- D_{R,sigma}: a single ring element -- see tibe.h's header
      * comment for why (forced by v's equation type-checking). */

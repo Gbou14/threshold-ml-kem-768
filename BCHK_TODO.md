@@ -275,15 +275,77 @@ ML-KEM.
           reuses a real 5-party round0, but detection itself returns
           almost immediately since the commitment check runs before
           any of round2's expensive work).
-  2. [ ] **8b -- the Gaussian sampler.** Replace the Box-Muller
-        approximation (`gauss.c`) with an exact, constant-time
-        discrete Gaussian sampler. This is the limitation flagged
-        most prominently in `src/tibe/README.md` ("Gaussian
-        sampling") -- as things stand, no real security claim can be
-        made about the deployed system without this. Real
-        cryptographic engineering (rejection sampling / CDT / a
-        convolution-based construction, each with genuine precision
-        and side-channel pitfalls), not a small patch.
+  2. [x] **8b -- the Gaussian sampler.** Replaced the Box-Muller
+        approximation (`gauss.c`) with an exact sampler, in two pieces
+        (full design writeup in `src/tibe/README.md` "Gaussian
+        sampling"):
+        - `TIBE_SIGMA=4`, `TIBE_SIGMA_A=8`: an exact
+          cumulative-distribution table (CDT), built once per sigma via
+          256-bit fixed-point BIGNUM arithmetic (a numerically robust
+          range-reduction-based `exp`, not an erf/CDF-inversion
+          approach, which has real cancellation problems at large
+          arguments), tail-truncated at `tau=15` (~2^-150 statistical
+          distance per ring-element sample after a union bound over
+          `TIBE_D=4096` coefficients), cached the same lazy-static-
+          global way `ring.c`'s `ring_modulus()` caches `q`/`r1`/`r2`.
+        - `TIBE_SIGMA_PRIME=2^19`, `TIBE_SIGMA_P=2^47`: a direct CDT is
+          infeasible at this scale (table size on the order of sigma
+          itself). Built instead via Micciancio & Walter's convolution
+          theorem (CRYPTO 2017 / eprint 2017/259, Theorem 2.1, read in
+          full via `WebFetch` before implementing rather than
+          reconstructed from memory, given the real risk of a subtle
+          error in a from-memory reimplementation of a non-trivial
+          peer-reviewed algorithm): combining two independent
+          width-`s` draws as `k*x1+x2` gives a width-`s*sqrt(k^2+1)`
+          draw, for any integer `k` respecting a small,
+          smoothing-parameter-derived bound that itself grows with
+          `s` -- so achievable width grows roughly *quadratically*
+          per combination level. Reaching `2^47` from a width-16
+          internal base takes only ~7 levels (128 base CDT draws,
+          computed and cached at runtime by `gauss_build_schedule`),
+          not the naive `(2^47/16)^2` a fixed-coefficient sum would
+          need.
+        - "Constant-time" is honestly scoped in both README.md and
+          gauss.h: a fixed, sigma-(i.e. public-parameter-)determined
+          iteration count and memory-access pattern in this module's
+          own C code, **not** independently verified against
+          microarchitectural side channels with a dedicated tool
+          (ctgrind, dudect) -- out of reach for a solo research
+          project without specialized tooling, flagged rather than
+          silently assumed.
+        - Public API (`gauss_sample_coeff`, `gauss_sample`,
+          `gauss_sample_coeff_from_prg`, `gauss_sample_from_prg`)
+          unchanged, so `tibe.c`/`threshold.c`/`tkem.c` needed no
+          algebra changes -- only `tibe.c`'s `gauss_prg_init` byte
+          budget, which now varies by width (a new
+          `gauss_bytes_per_coeff` helper) since the old flat
+          16-bytes-per-coefficient assumption no longer holds (a
+          direct-CDT width needs 32; a convolution width needs
+          `32*2^levels`, e.g. 4096 for `TIBE_SIGMA_PRIME`).
+        - `test/test_gauss.c` extended: mean/stddev checks now cover
+          all four widths (previously `TIBE_SIGMA_PRIME` wasn't
+          checked at all) on both the `RAND_bytes` and `gauss_prg`
+          paths, plus a new empirical-PMF-vs-theoretical-PMF
+          goodness-of-fit check for the two direct-CDT widths
+          (comparing this module's BIGNUM fixed-point `exp` against an
+          independently-computed plain-double `exp` -- a check
+          Box-Muller's continuous approximation couldn't meaningfully
+          support). All pass; runs in ~14s (dramatically faster than
+          Box-Muller-based intuition would suggest, since a CDT lookup
+          is many cheap integer compares, not a transcendental
+          function call).
+        - Full regression suite (`test_ring` through `test_tkem`)
+          re-run end to end to confirm the new sampler doesn't change
+          the algebra anywhere it's used (Setup's `(s_a,e_a)`,
+          Encrypt's `s`/`e`/`e'`, threshold blinding) -- **all 7 pass**,
+          including Phase 8a's below-threshold and malicious-party
+          checks. Real but modest slowdown, dominated by `test_tibe`'s
+          ~2x jump (9-10min -> 20m29s, proportionally the most
+          Gaussian-sampling-heavy test); `test_threshold` 47.5min ->
+          57m44s, `test_tkem` 30min -> 34m15s -- see
+          `src/tibe/README.md` "Performance" for the full breakdown
+          and why the two huge (convolution-built) widths turned out
+          cheap in practice despite the naive-looking recursion depth.
   3. [ ] **8c -- robustness.** Misbehaving-shareholder detection is
         already real (the commit-then-reveal check, once 8a confirms
         it end to end); *recovery* (continuing correctly despite a
